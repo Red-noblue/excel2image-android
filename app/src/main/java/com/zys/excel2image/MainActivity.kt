@@ -203,6 +203,10 @@ class MainActivity : AppCompatActivity() {
                             scale = 0.6f,
                             maxBitmapDimension = 4096,
                             maxTotalPixels = 8_000_000L,
+                            // Keep preview responsive; export will do a deeper pass.
+                            trimMaxCells = 20_000,
+                            autoFitMaxCells = 20_000,
+                            maxAutoRowHeightPx = 900,
                         ),
                     )
                 }
@@ -258,6 +262,10 @@ class MainActivity : AppCompatActivity() {
                             scale = 1.4f,
                             maxBitmapDimension = 16_000,
                             maxTotalPixels = 20_000_000L,
+                            // Export can spend more time to improve readability.
+                            trimMaxCells = 250_000,
+                            autoFitMaxCells = 250_000,
+                            maxAutoRowHeightPx = 2000,
                         ),
                     )
                 }

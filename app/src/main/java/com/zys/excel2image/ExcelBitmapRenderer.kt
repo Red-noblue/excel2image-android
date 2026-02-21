@@ -26,6 +26,14 @@ data class RenderOptions(
     val scale: Float,
     val maxBitmapDimension: Int = 16_000,
     val maxTotalPixels: Long = 100_000_000L,
+    // "Share clear (tight)" helpers.
+    val trimBlankEdges: Boolean = true,
+    val autoFitRowHeights: Boolean = true,
+    // Safety limits to avoid heavy scanning on huge sheets.
+    val trimMaxCells: Int = 120_000,
+    val autoFitMaxCells: Int = 120_000,
+    // Cap auto row height growth in *base* pixels (before applying `scale`).
+    val maxAutoRowHeightPx: Int = 1200,
 )
 
 data class RenderResult(
@@ -45,8 +53,8 @@ object ExcelBitmapRenderer {
     fun renderSheet(workbook: Workbook, sheetIndex: Int, options: RenderOptions): RenderResult {
         val sheet = workbook.getSheetAt(sheetIndex)
 
-        val used = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
-        if (used == null) {
+        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
+        if (candidateRange == null) {
             val bmp = Bitmap.createBitmap(800, 400, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
             canvas.drawColor(Color.WHITE)
@@ -56,6 +64,25 @@ object ExcelBitmapRenderer {
             }
             canvas.drawText("空表", 40f, 120f, p)
             return RenderResult(bitmaps = listOf(bmp), wasSplit = false, warnings = emptyList())
+        }
+
+        val warnings = mutableListOf<String>()
+        val formatter = DataFormatter()
+        val evaluator = workbook.creationHelper.createFormulaEvaluator()
+
+        val used = if (options.trimBlankEdges) {
+            val trim = trimUsedRange(
+                sheet = sheet,
+                range = candidateRange,
+                formatter = formatter,
+                evaluator = evaluator,
+                maxCells = options.trimMaxCells,
+            )
+            trim.warning?.let { warnings += it }
+            if (trim.didTrim) warnings += "已自动裁剪空白边缘"
+            trim.range
+        } else {
+            candidateRange
         }
 
         val (firstRow, lastRow, firstCol, lastCol) = used
@@ -70,12 +97,37 @@ object ExcelBitmapRenderer {
             max(12, (widthChars * maxDigitWidthPx + 5f).roundToInt())
         }
 
-        val baseRowHeightsPx = IntArray(lastRow - firstRow + 1) { idx ->
+        val baseRowHeightsPxRaw = IntArray(lastRow - firstRow + 1) { idx ->
             val rowNum = firstRow + idx
             val row = sheet.getRow(rowNum)
             if (row?.zeroHeight == true) return@IntArray 0
             val htPt = row?.heightInPoints ?: sheet.defaultRowHeightInPoints
             max(16, ceil(htPt * 4f / 3f).toInt())
+        }
+
+        val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
+
+        val baseRowHeightsPx = if (options.autoFitRowHeights) {
+            val fit = autoFitRowHeightsPx(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                baseColWidthsPx = baseColWidthsPx,
+                baseRowHeightsPx = baseRowHeightsPxRaw,
+                mergeInfo = mergeInfo,
+                maxCells = options.autoFitMaxCells,
+                maxAutoRowHeightPx = options.maxAutoRowHeightPx,
+            )
+            fit.warning?.let { warnings += it }
+            if (fit.didChange) warnings += "已自动调整行高以适配换行"
+            fit.rowHeightsPx
+        } else {
+            baseRowHeightsPxRaw
         }
 
         // Apply initial scale. We'll shrink further if needed to respect bitmap constraints.
@@ -91,12 +143,9 @@ object ExcelBitmapRenderer {
             width = scaledSum(baseColWidthsPx)
         }
 
-        val warnings = mutableListOf<String>()
         if (width > options.maxBitmapDimension) {
             warnings += "表格太宽，已强制缩小"
         }
-
-        val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
 
         val parts = planVerticalParts(
             baseRowHeightsPx = baseRowHeightsPx,
@@ -116,9 +165,6 @@ object ExcelBitmapRenderer {
             canvas.drawText("无可见内容（可能都被隐藏）", 40f, 120f, p)
             return RenderResult(bitmaps = listOf(bmp), wasSplit = false, warnings = warnings)
         }
-
-        val formatter = DataFormatter()
-        val evaluator = workbook.creationHelper.createFormulaEvaluator()
 
         val bitmaps = parts.mapIndexed { partIndex, part ->
             val partHeight = part.heightPx
@@ -173,6 +219,223 @@ object ExcelBitmapRenderer {
         val heightPx: Int,
     )
 
+    private data class TrimOutcome(
+        val range: UsedRange,
+        val didTrim: Boolean,
+        val warning: String? = null,
+    )
+
+    private fun trimUsedRange(
+        sheet: Sheet,
+        range: UsedRange,
+        formatter: DataFormatter,
+        evaluator: org.apache.poi.ss.usermodel.FormulaEvaluator,
+        maxCells: Int,
+    ): TrimOutcome {
+        val mergedRegions = (0 until sheet.numMergedRegions).map { sheet.getMergedRegion(it) }
+
+        var minRow = Int.MAX_VALUE
+        var maxRow = -1
+        var minCol = Int.MAX_VALUE
+        var maxCol = -1
+
+        var processed = 0
+
+        val rowIt = sheet.rowIterator()
+        while (rowIt.hasNext()) {
+            val row = rowIt.next()
+            val r = row.rowNum
+            if (r < range.firstRow || r > range.lastRow) continue
+            if (row.zeroHeight) continue
+
+            val cellIt = row.cellIterator()
+            while (cellIt.hasNext()) {
+                val cell = cellIt.next()
+                val c = cell.columnIndex
+                if (c < range.firstCol || c > range.lastCol) continue
+                if (sheet.isColumnHidden(c)) continue
+
+                processed++
+                if (processed > maxCells) {
+                    return TrimOutcome(range = range, didTrim = false, warning = "表格较大，已跳过裁剪空白边缘")
+                }
+
+                if (!cellIsVisuallyUsed(cell, formatter, evaluator)) continue
+
+                val mr = mergedRegions.firstOrNull {
+                    r in it.firstRow..it.lastRow && c in it.firstColumn..it.lastColumn
+                }
+                if (mr != null) {
+                    minRow = min(minRow, max(range.firstRow, mr.firstRow))
+                    maxRow = max(maxRow, min(range.lastRow, mr.lastRow))
+                    minCol = min(minCol, max(range.firstCol, mr.firstColumn))
+                    maxCol = max(maxCol, min(range.lastCol, mr.lastColumn))
+                } else {
+                    minRow = min(minRow, r)
+                    maxRow = max(maxRow, r)
+                    minCol = min(minCol, c)
+                    maxCol = max(maxCol, c)
+                }
+            }
+        }
+
+        if (maxRow < 0 || maxCol < 0 || minRow == Int.MAX_VALUE || minCol == Int.MAX_VALUE) {
+            return TrimOutcome(range = range, didTrim = false)
+        }
+
+        val trimmed = UsedRange(
+            firstRow = minRow.coerceIn(range.firstRow, range.lastRow),
+            lastRow = maxRow.coerceIn(range.firstRow, range.lastRow),
+            firstCol = minCol.coerceIn(range.firstCol, range.lastCol),
+            lastCol = maxCol.coerceIn(range.firstCol, range.lastCol),
+        )
+
+        return TrimOutcome(range = trimmed, didTrim = trimmed != range)
+    }
+
+    private data class AutoFitOutcome(
+        val rowHeightsPx: IntArray,
+        val didChange: Boolean,
+        val warning: String? = null,
+    )
+
+    private fun autoFitRowHeightsPx(
+        workbook: Workbook,
+        sheet: Sheet,
+        formatter: DataFormatter,
+        evaluator: org.apache.poi.ss.usermodel.FormulaEvaluator,
+        firstRow: Int,
+        lastRow: Int,
+        firstCol: Int,
+        lastCol: Int,
+        baseColWidthsPx: IntArray,
+        baseRowHeightsPx: IntArray,
+        mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+        maxCells: Int,
+        maxAutoRowHeightPx: Int,
+    ): AutoFitOutcome {
+        val (cellToMerge, mergeStarts) = mergeInfo
+
+        val out = baseRowHeightsPx.clone()
+        var changed = false
+
+        val padding = 4f
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        var processed = 0
+
+        val rowIt = sheet.rowIterator()
+        while (rowIt.hasNext()) {
+            val row = rowIt.next()
+            val r = row.rowNum
+            if (r < firstRow || r > lastRow) continue
+            if (row.zeroHeight) continue
+
+            val rowIdx = r - firstRow
+            if (rowIdx !in out.indices) continue
+            if (out[rowIdx] <= 0) continue
+
+            val cellIt = row.cellIterator()
+            while (cellIt.hasNext()) {
+                val cell = cellIt.next()
+                val c = cell.columnIndex
+                if (c < firstCol || c > lastCol) continue
+                if (sheet.isColumnHidden(c)) continue
+
+                processed++
+                if (processed > maxCells) {
+                    return AutoFitOutcome(
+                        rowHeightsPx = out,
+                        didChange = changed,
+                        warning = "表格较大，已限制自适应行高的扫描范围",
+                    )
+                }
+
+                val style = cell.cellStyle
+                val rawText = runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
+                if (rawText.isBlank()) continue
+
+                val wrap = style.wrapText || rawText.contains('\n') || rawText.contains('\r')
+                if (!wrap) continue
+
+                val key = cellKey(r, c)
+                val merge = cellToMerge[key]
+                if (merge != null && key !in mergeStarts) {
+                    continue
+                }
+
+                // Only handle single-row merged cells for now (common in headers).
+                if (merge != null && merge.firstRow != merge.lastRow) {
+                    continue
+                }
+
+                val spanFirstCol = merge?.firstCol ?: c
+                val spanLastCol = merge?.lastCol ?: c
+
+                var widthPx = 0
+                for (absCol in spanFirstCol..spanLastCol) {
+                    val idx = absCol - firstCol
+                    if (idx !in baseColWidthsPx.indices) continue
+                    widthPx += baseColWidthsPx[idx]
+                }
+                if (widthPx <= 0) continue
+
+                val availableWidth = max(0f, widthPx.toFloat() - padding * 2)
+                val font = workbook.getFontAt(style.fontIndex)
+                applyFont(paint, font, 1f)
+
+                val lineCount = countLinesForLayout(rawText, paint, availableWidth, style.wrapText)
+                val required = ceil(padding * 2 + lineCount * paint.fontSpacing).toInt()
+
+                val capped = min(required, maxAutoRowHeightPx)
+                if (capped > out[rowIdx]) {
+                    out[rowIdx] = capped
+                    changed = true
+                }
+            }
+        }
+
+        return AutoFitOutcome(rowHeightsPx = out, didChange = changed)
+    }
+
+    private fun countLinesForLayout(text: String, paint: Paint, maxWidth: Float, wrap: Boolean): Int {
+        if (text.isEmpty()) return 0
+
+        val paragraphs = text.split("\r\n", "\n", "\r")
+        if (paragraphs.isEmpty()) return 0
+
+        var count = 0
+        for (para in paragraphs) {
+            if (!wrap || maxWidth <= 0f) {
+                count += 1
+            } else {
+                count += breakSingleLine(para, paint, maxWidth).size
+            }
+        }
+
+        return max(1, count)
+    }
+
+    private fun cellIsVisuallyUsed(
+        cell: Cell,
+        formatter: DataFormatter,
+        evaluator: org.apache.poi.ss.usermodel.FormulaEvaluator,
+    ): Boolean {
+        val style = cell.cellStyle
+        val hasBorder =
+            style.borderTop != BorderStyle.NONE ||
+                style.borderRight != BorderStyle.NONE ||
+                style.borderBottom != BorderStyle.NONE ||
+                style.borderLeft != BorderStyle.NONE
+
+        val hasFill = backgroundColorArgb(style) != null
+
+        if (hasBorder || hasFill) return true
+
+        val text = runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
+        return text.isNotBlank()
+    }
+
     private fun findUsedRange(sheet: Sheet): UsedRange? {
         var firstRow = Int.MAX_VALUE
         var lastRow = -1
@@ -191,6 +454,15 @@ object ExcelBitmapRenderer {
                 firstCol = min(firstCol, fc)
                 lastCol = max(lastCol, lc)
             }
+        }
+
+        // Include merged regions even if the row/cell iterators are sparse.
+        for (i in 0 until sheet.numMergedRegions) {
+            val region: CellRangeAddress = sheet.getMergedRegion(i)
+            firstRow = min(firstRow, region.firstRow)
+            lastRow = max(lastRow, region.lastRow)
+            firstCol = min(firstCol, region.firstColumn)
+            lastCol = max(lastCol, region.lastColumn)
         }
 
         if (lastRow < 0 || lastCol < 0 || firstRow == Int.MAX_VALUE || firstCol == Int.MAX_VALUE) {
@@ -269,6 +541,8 @@ object ExcelBitmapRenderer {
         maxBitmapDimension: Int,
         maxTotalPixels: Long,
     ): List<PartPlan> {
+        if (scaledWidthPx <= 0) return emptyList()
+
         val scaledRowHeights = baseRowHeightsPx.map { h ->
             if (h <= 0) 0 else max(1, (h * scale).toInt())
         }
