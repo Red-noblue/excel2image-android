@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Simple table icon -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,28h60v52h-60zM30,34v10h16v-10zM48,34v10h16v-10zM66,34v10h12v-10zM30,46v10h16v-10zM48,46v10h16v-10zM66,46v10h12v-10zM30,58v16h16v-16zM48,58v16h16v-16zM66,58v16h12v-16z" />
+</vector>
+

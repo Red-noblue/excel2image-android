@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Excel转图片</string>
+    <string name="open_excel">打开Excel</string>
+    <string name="export_image">导出图片</string>
+    <string name="share_image">分享</string>
+    <string name="status_idle">请选择一个Excel文件</string>
+</resources>
+
