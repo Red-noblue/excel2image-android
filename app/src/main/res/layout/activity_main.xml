@@ -36,6 +36,30 @@
             android:text="@string/share_image" />
     </LinearLayout>
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnExportPdf"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="@string/export_pdf" />
+
+        <Button
+            android:id="@+id/btnSharePdf"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:enabled="false"
+            android:text="@string/share_pdf" />
+    </LinearLayout>
+
     <Spinner
         android:id="@+id/spinnerSheets"
         android:layout_width="match_parent"
@@ -68,4 +92,3 @@
         android:scaleType="centerInside" />
 
 </LinearLayout>
-

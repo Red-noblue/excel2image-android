@@ -10,6 +10,9 @@ local.properties
 .idea/
 *.iml
 
+# Local scratch
+.ys_files/
+
 # macOS
 .DS_Store
 

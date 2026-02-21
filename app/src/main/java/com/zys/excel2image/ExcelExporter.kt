@@ -15,23 +15,25 @@ object ExcelExporter {
     ): List<Uri> = withContext(Dispatchers.Default) {
         val sheetName = workbook.getSheetAt(sheetIndex).sheetName
 
-        val render = ExcelBitmapRenderer.renderSheet(workbook, sheetIndex, options)
-        val out = ArrayList<Uri>(render.bitmaps.size)
+        val out = ArrayList<Uri>()
 
-        for ((i, bmp) in render.bitmaps.withIndex()) {
+        ExcelBitmapRenderer.renderSheetParts(
+            workbook = workbook,
+            sheetIndex = sheetIndex,
+            options = options,
+        ) { partIndex, partCount, bmp ->
             val displayName = buildString {
                 append(baseName)
                 append("_")
                 append(sanitizeForFileName(sheetName))
-                if (render.bitmaps.size > 1) {
+                if (partCount > 1) {
                     append("_p")
-                    append((i + 1).toString().padStart(2, '0'))
+                    append((partIndex + 1).toString().padStart(2, '0'))
                 }
                 append(".png")
             }
             val uri = ImageSaver.savePngToPictures(context, displayName, bmp)
             out += uri
-            bmp.recycle()
         }
 
         out
@@ -41,4 +43,3 @@ object ExcelExporter {
         return name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifBlank { "sheet" }
     }
 }
-

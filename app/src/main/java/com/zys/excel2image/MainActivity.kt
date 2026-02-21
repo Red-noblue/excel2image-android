@@ -28,13 +28,20 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
+    private enum class PendingExport {
+        IMAGE,
+        PDF,
+    }
+
     private var workbook: Workbook? = null
     private var workbookName: String = "workbook"
     private var currentSheetIndex: Int = 0
     private var lastExportUris: List<Uri> = emptyList()
+    private var lastExportPdfUri: Uri? = null
     private var previewBitmap: android.graphics.Bitmap? = null
 
     private var renderJob: Job? = null
+    private var pendingExport: PendingExport? = null
 
     private val openDocumentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -55,9 +62,14 @@ class MainActivity : AppCompatActivity() {
     private val writeStoragePermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
-                exportCurrentSheet()
+                when (pendingExport) {
+                    PendingExport.PDF -> exportCurrentSheetPdf()
+                    else -> exportCurrentSheet()
+                }
+                pendingExport = null
             } else {
-                showMessage("需要存储权限才能保存到相册（Android 9 及以下）。")
+                showMessage("需要存储权限才能保存文件（Android 9 及以下）。")
+                pendingExport = null
             }
         }
 
@@ -79,6 +91,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnExport.setOnClickListener {
             if (needsLegacyWritePermission()) {
+                pendingExport = PendingExport.IMAGE
                 writeStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             } else {
                 exportCurrentSheet()
@@ -87,6 +100,19 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnShare.setOnClickListener {
             shareLastExport()
+        }
+
+        binding.btnExportPdf.setOnClickListener {
+            if (needsLegacyWritePermission()) {
+                pendingExport = PendingExport.PDF
+                writeStoragePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            } else {
+                exportCurrentSheetPdf()
+            }
+        }
+
+        binding.btnSharePdf.setOnClickListener {
+            shareLastPdf()
         }
 
         binding.spinnerSheets.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -148,6 +174,8 @@ class MainActivity : AppCompatActivity() {
         previewBitmap = null
         binding.imgPreview.setImageDrawable(null)
         lastExportUris = emptyList()
+        lastExportPdfUri = null
+        pendingExport = null
         updateButtons()
 
         binding.progress.isVisible = true
@@ -260,7 +288,9 @@ class MainActivity : AppCompatActivity() {
                         sheetIndex = currentSheetIndex,
                         baseName = workbookName,
                         options = RenderOptions(
-                            scale = 1.4f,
+                            // Higher scale => clearer text when zooming in the gallery.
+                            // (Still capped by maxBitmapDimension/maxTotalPixels to avoid OOM.)
+                            scale = 2.0f,
                             maxBitmapDimension = 16_000,
                             maxTotalPixels = 20_000_000L,
                             // Export can spend more time to improve readability.
@@ -268,6 +298,7 @@ class MainActivity : AppCompatActivity() {
                             columnWidthMaxCells = 250_000,
                             autoFitMaxCells = 250_000,
                             maxAutoRowHeightPx = 2000,
+                            minFontPt = 10,
                         ),
                     )
                 }
@@ -285,6 +316,60 @@ class MainActivity : AppCompatActivity() {
                 binding.txtStatus.text = "导出失败：${e.message ?: e.javaClass.simpleName}"
                 showMessage("导出失败：${e.message ?: e.javaClass.simpleName}")
                 showErrorDialog("导出失败", e)
+                updateButtons()
+            }
+        }
+    }
+
+    private fun exportCurrentSheetPdf() {
+        val wb = workbook ?: return
+
+        binding.progress.isVisible = true
+        binding.txtStatus.text = "正在导出PDF…"
+        updateButtons()
+
+        lifecycleScope.launch {
+            val exportResult = withContext(Dispatchers.Default) {
+                runCatching {
+                    ExcelPdfExporter.exportSheetAsPdf(
+                        context = this@MainActivity,
+                        workbook = wb,
+                        sheetIndex = currentSheetIndex,
+                        baseName = workbookName,
+                        options = RenderOptions(
+                            scale = 1.4f,
+                            maxBitmapDimension = 16_000,
+                            // PDF doesn't allocate bitmaps, but we still keep page sizes reasonable.
+                            maxTotalPixels = Long.MAX_VALUE,
+                            trimMaxCells = 250_000,
+                            columnWidthMaxCells = 250_000,
+                            autoFitMaxCells = 250_000,
+                            maxAutoRowHeightPx = 2000,
+                            minFontPt = 10,
+                        ),
+                    )
+                }
+            }
+
+            binding.progress.isVisible = false
+
+            exportResult.onSuccess { res ->
+                lastExportPdfUri = res.uri
+                val pageCount = res.writeResult.pageCount
+                binding.txtStatus.text = buildString {
+                    append("导出完成：已保存 1 个 PDF（")
+                    append(pageCount)
+                    append(" 页，可直接分享）")
+                    if (res.writeResult.warnings.isNotEmpty()) {
+                        append("  ")
+                        append(res.writeResult.warnings.joinToString("；"))
+                    }
+                }
+                updateButtons()
+            }.onFailure { e ->
+                binding.txtStatus.text = "导出PDF失败：${e.message ?: e.javaClass.simpleName}"
+                showMessage("导出PDF失败：${e.message ?: e.javaClass.simpleName}")
+                showErrorDialog("导出PDF失败", e)
                 updateButtons()
             }
         }
@@ -313,11 +398,29 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent.createChooser(intent, "分享图片"))
     }
 
+    private fun shareLastPdf() {
+        val uri = lastExportPdfUri
+        if (uri == null) {
+            showMessage("请先导出PDF。")
+            return
+        }
+
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/pdf"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        startActivity(Intent.createChooser(intent, "分享PDF"))
+    }
+
     private fun updateButtons() {
         val hasWorkbook = workbook != null
         val busy = binding.progress.isVisible
         binding.btnExport.isEnabled = hasWorkbook && !busy
         binding.btnShare.isEnabled = lastExportUris.isNotEmpty() && !busy
+        binding.btnExportPdf.isEnabled = hasWorkbook && !busy
+        binding.btnSharePdf.isEnabled = lastExportPdfUri != null && !busy
     }
 
     private fun needsLegacyWritePermission(): Boolean {

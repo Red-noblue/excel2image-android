@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.pdf.PdfDocument
 import org.apache.poi.ss.usermodel.Cell
 import org.apache.poi.ss.usermodel.BorderStyle
 import org.apache.poi.ss.usermodel.CellType
@@ -17,6 +18,7 @@ import org.apache.poi.ss.usermodel.Sheet
 import org.apache.poi.ss.usermodel.VerticalAlignment
 import org.apache.poi.ss.usermodel.Workbook
 import org.apache.poi.ss.util.CellRangeAddress
+import java.io.OutputStream
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -49,6 +51,18 @@ data class RenderOptions(
 
 data class RenderResult(
     val bitmaps: List<Bitmap>,
+    val wasSplit: Boolean,
+    val warnings: List<String>,
+)
+
+data class PdfWriteResult(
+    val pageCount: Int,
+    val wasSplit: Boolean,
+    val warnings: List<String>,
+)
+
+data class RenderPartsResult(
+    val partCount: Int,
     val wasSplit: Boolean,
     val warnings: List<String>,
 )
@@ -249,6 +263,432 @@ object ExcelBitmapRenderer {
         return RenderResult(
             bitmaps = bitmaps,
             wasSplit = bitmaps.size > 1,
+            warnings = warnings.distinct(),
+        )
+    }
+
+    fun renderSheetParts(
+        workbook: Workbook,
+        sheetIndex: Int,
+        options: RenderOptions,
+        recycleAfterCallback: Boolean = true,
+        onPart: (partIndex: Int, partCount: Int, bitmap: Bitmap) -> Unit,
+    ): RenderPartsResult {
+        val sheet = workbook.getSheetAt(sheetIndex)
+
+        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
+        if (candidateRange == null) {
+            val bmp = Bitmap.createBitmap(800, 400, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(Color.WHITE)
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.DKGRAY
+                textSize = 40f
+            }
+            canvas.drawText("空表", 40f, 120f, p)
+            try {
+                onPart(0, 1, bmp)
+            } finally {
+                if (recycleAfterCallback) bmp.recycle()
+            }
+            return RenderPartsResult(partCount = 1, wasSplit = false, warnings = emptyList())
+        }
+
+        val warnings = mutableListOf<String>()
+        val formatter = DataFormatter()
+        val evaluator = workbook.creationHelper.createFormulaEvaluator()
+
+        val used = if (options.trimBlankEdges) {
+            val trim = trimUsedRange(
+                sheet = sheet,
+                range = candidateRange,
+                formatter = formatter,
+                evaluator = evaluator,
+                maxCells = options.trimMaxCells,
+            )
+            trim.warning?.let { warnings += it }
+            if (trim.didTrim) warnings += "已自动裁剪空白边缘"
+            trim.range
+        } else {
+            candidateRange
+        }
+
+        val (firstRow, lastRow, firstCol, lastCol) = used
+
+        val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
+
+        val maxDigitWidthPx = computeMaxDigitWidthPx(workbook)
+        val baseColWidthsPxRaw = IntArray(lastCol - firstCol + 1) { idx ->
+            val col = firstCol + idx
+            if (sheet.isColumnHidden(col)) return@IntArray 0
+            val widthChars = sheet.getColumnWidth(col) / 256f
+            max(12, (widthChars * maxDigitWidthPx + 5f).roundToInt())
+        }
+
+        val baseColWidthsPx = if (options.adaptiveColumnWidths) {
+            val fit = adaptColumnWidthsPx(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                baseColWidthsPx = baseColWidthsPxRaw,
+                mergeInfo = mergeInfo,
+                maxCells = options.columnWidthMaxCells,
+                sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
+                minColumnWidthPx = options.minColumnWidthPx,
+                emptyColumnWidthPx = options.emptyColumnWidthPx,
+                maxColumnWidthPx = options.maxColumnWidthPx,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            if (fit.didChange) warnings += "已自动调整列宽"
+            fit.colWidthsPx
+        } else {
+            baseColWidthsPxRaw
+        }
+
+        val baseRowHeightsPxRaw = IntArray(lastRow - firstRow + 1) { idx ->
+            val rowNum = firstRow + idx
+            val row = sheet.getRow(rowNum)
+            if (row?.zeroHeight == true) return@IntArray 0
+            val htPt = row?.heightInPoints ?: sheet.defaultRowHeightInPoints
+            max(16, ceil(htPt * 4f / 3f).toInt())
+        }
+
+        val baseRowHeightsPx = if (options.autoFitRowHeights) {
+            val fit = autoFitRowHeightsPx(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                baseColWidthsPx = baseColWidthsPx,
+                baseRowHeightsPx = baseRowHeightsPxRaw,
+                mergeInfo = mergeInfo,
+                maxCells = options.autoFitMaxCells,
+                maxAutoRowHeightPx = options.maxAutoRowHeightPx,
+                autoWrapOverflowText = options.autoWrapOverflowText,
+                autoWrapMinTextLength = options.autoWrapMinTextLength,
+                autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            if (fit.didChange) warnings += "已自动调整行高以适配换行"
+            fit.rowHeightsPx
+        } else {
+            baseRowHeightsPxRaw
+        }
+
+        var scale = options.scale.coerceAtLeast(0.1f)
+
+        fun scaledSum(arr: IntArray): Int = arr.sumOf { (it * scale).toInt() }
+
+        var width = scaledSum(baseColWidthsPx)
+
+        if (width > options.maxBitmapDimension) {
+            val shrink = options.maxBitmapDimension.toFloat() / width.toFloat()
+            scale *= shrink
+            width = scaledSum(baseColWidthsPx)
+        }
+
+        if (width > options.maxBitmapDimension) {
+            warnings += "表格太宽，已强制缩小"
+        }
+
+        val parts = planVerticalParts(
+            baseRowHeightsPx = baseRowHeightsPx,
+            scaledWidthPx = width,
+            scale = scale,
+            maxBitmapDimension = options.maxBitmapDimension,
+            maxTotalPixels = options.maxTotalPixels,
+        )
+        if (parts.isEmpty()) {
+            val bmp = Bitmap.createBitmap(800, 400, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(Color.WHITE)
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.DKGRAY
+                textSize = 36f
+            }
+            canvas.drawText("无可见内容（可能都被隐藏）", 40f, 120f, p)
+            try {
+                onPart(0, 1, bmp)
+            } finally {
+                if (recycleAfterCallback) bmp.recycle()
+            }
+            return RenderPartsResult(partCount = 1, wasSplit = false, warnings = warnings.distinct())
+        }
+
+        if (parts.size > 1) {
+            warnings += "因尺寸限制自动分段"
+        }
+
+        for ((i, part) in parts.withIndex()) {
+            val bmp = Bitmap.createBitmap(width, part.heightPx, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(Color.WHITE)
+
+            drawSheetPart(
+                canvas = canvas,
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                baseColWidthsPx = baseColWidthsPx,
+                baseRowHeightsPx = baseRowHeightsPx,
+                scale = scale,
+                partRowStart = part.rowStart,
+                partRowEnd = part.rowEnd,
+                partTopOffsetPx = part.topOffsetPx,
+                mergeInfo = mergeInfo,
+                autoWrapOverflowText = options.autoWrapOverflowText,
+                autoWrapMinTextLength = options.autoWrapMinTextLength,
+                autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+
+            try {
+                onPart(i, parts.size, bmp)
+            } finally {
+                if (recycleAfterCallback) bmp.recycle()
+            }
+        }
+
+        return RenderPartsResult(
+            partCount = parts.size,
+            wasSplit = parts.size > 1,
+            warnings = warnings.distinct(),
+        )
+    }
+
+    fun writeSheetPdf(
+        workbook: Workbook,
+        sheetIndex: Int,
+        options: RenderOptions,
+        out: OutputStream,
+    ): PdfWriteResult {
+        val sheet = workbook.getSheetAt(sheetIndex)
+
+        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
+        if (candidateRange == null) {
+            val pdf = PdfDocument()
+            try {
+                val pageInfo = PdfDocument.PageInfo.Builder(800, 400, 1).create()
+                val page = pdf.startPage(pageInfo)
+                val canvas = page.canvas
+                canvas.drawColor(Color.WHITE)
+                val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.DKGRAY
+                    textSize = 40f
+                }
+                canvas.drawText("空表", 40f, 120f, p)
+                pdf.finishPage(page)
+                pdf.writeTo(out)
+            } finally {
+                pdf.close()
+            }
+            return PdfWriteResult(pageCount = 1, wasSplit = false, warnings = emptyList())
+        }
+
+        val warnings = mutableListOf<String>()
+        val formatter = DataFormatter()
+        val evaluator = workbook.creationHelper.createFormulaEvaluator()
+
+        val used = if (options.trimBlankEdges) {
+            val trim = trimUsedRange(
+                sheet = sheet,
+                range = candidateRange,
+                formatter = formatter,
+                evaluator = evaluator,
+                maxCells = options.trimMaxCells,
+            )
+            trim.warning?.let { warnings += it }
+            if (trim.didTrim) warnings += "已自动裁剪空白边缘"
+            trim.range
+        } else {
+            candidateRange
+        }
+
+        val (firstRow, lastRow, firstCol, lastCol) = used
+
+        val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
+
+        val maxDigitWidthPx = computeMaxDigitWidthPx(workbook)
+        val baseColWidthsPxRaw = IntArray(lastCol - firstCol + 1) { idx ->
+            val col = firstCol + idx
+            if (sheet.isColumnHidden(col)) return@IntArray 0
+            val widthChars = sheet.getColumnWidth(col) / 256f
+            max(12, (widthChars * maxDigitWidthPx + 5f).roundToInt())
+        }
+
+        val baseColWidthsPx = if (options.adaptiveColumnWidths) {
+            val fit = adaptColumnWidthsPx(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                baseColWidthsPx = baseColWidthsPxRaw,
+                mergeInfo = mergeInfo,
+                maxCells = options.columnWidthMaxCells,
+                sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
+                minColumnWidthPx = options.minColumnWidthPx,
+                emptyColumnWidthPx = options.emptyColumnWidthPx,
+                maxColumnWidthPx = options.maxColumnWidthPx,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            if (fit.didChange) warnings += "已自动调整列宽"
+            fit.colWidthsPx
+        } else {
+            baseColWidthsPxRaw
+        }
+
+        val baseRowHeightsPxRaw = IntArray(lastRow - firstRow + 1) { idx ->
+            val rowNum = firstRow + idx
+            val row = sheet.getRow(rowNum)
+            if (row?.zeroHeight == true) return@IntArray 0
+            val htPt = row?.heightInPoints ?: sheet.defaultRowHeightInPoints
+            max(16, ceil(htPt * 4f / 3f).toInt())
+        }
+
+        val baseRowHeightsPx = if (options.autoFitRowHeights) {
+            val fit = autoFitRowHeightsPx(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                baseColWidthsPx = baseColWidthsPx,
+                baseRowHeightsPx = baseRowHeightsPxRaw,
+                mergeInfo = mergeInfo,
+                maxCells = options.autoFitMaxCells,
+                maxAutoRowHeightPx = options.maxAutoRowHeightPx,
+                autoWrapOverflowText = options.autoWrapOverflowText,
+                autoWrapMinTextLength = options.autoWrapMinTextLength,
+                autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            if (fit.didChange) warnings += "已自动调整行高以适配换行"
+            fit.rowHeightsPx
+        } else {
+            baseRowHeightsPxRaw
+        }
+
+        // Apply initial scale. We'll shrink further if needed to respect page constraints.
+        var scale = options.scale.coerceAtLeast(0.1f)
+
+        fun scaledSum(arr: IntArray): Int = arr.sumOf { (it * scale).toInt() }
+
+        var width = scaledSum(baseColWidthsPx)
+
+        if (width > options.maxBitmapDimension) {
+            val shrink = options.maxBitmapDimension.toFloat() / width.toFloat()
+            scale *= shrink
+            width = scaledSum(baseColWidthsPx)
+        }
+
+        if (width > options.maxBitmapDimension) {
+            warnings += "表格太宽，已强制缩小"
+        }
+
+        val parts = planVerticalParts(
+            baseRowHeightsPx = baseRowHeightsPx,
+            scaledWidthPx = width,
+            scale = scale,
+            maxBitmapDimension = options.maxBitmapDimension,
+            maxTotalPixels = options.maxTotalPixels,
+        )
+        if (parts.isEmpty()) {
+            val pdf = PdfDocument()
+            try {
+                val pageInfo = PdfDocument.PageInfo.Builder(800, 400, 1).create()
+                val page = pdf.startPage(pageInfo)
+                val canvas = page.canvas
+                canvas.drawColor(Color.WHITE)
+                val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.DKGRAY
+                    textSize = 36f
+                }
+                canvas.drawText("无可见内容（可能都被隐藏）", 40f, 120f, p)
+                pdf.finishPage(page)
+                pdf.writeTo(out)
+            } finally {
+                pdf.close()
+            }
+            return PdfWriteResult(pageCount = 1, wasSplit = false, warnings = warnings.distinct())
+        }
+
+        if (parts.size > 1) {
+            warnings += "因尺寸限制自动分段"
+        }
+
+        val pdf = PdfDocument()
+        try {
+            for ((i, part) in parts.withIndex()) {
+                val pageInfo = PdfDocument.PageInfo.Builder(width, part.heightPx, i + 1).create()
+                val page = pdf.startPage(pageInfo)
+                val canvas = page.canvas
+                canvas.drawColor(Color.WHITE)
+
+                drawSheetPart(
+                    canvas = canvas,
+                    workbook = workbook,
+                    sheet = sheet,
+                    formatter = formatter,
+                    evaluator = evaluator,
+                    firstRow = firstRow,
+                    lastRow = lastRow,
+                    firstCol = firstCol,
+                    lastCol = lastCol,
+                    baseColWidthsPx = baseColWidthsPx,
+                    baseRowHeightsPx = baseRowHeightsPx,
+                    scale = scale,
+                    partRowStart = part.rowStart,
+                    partRowEnd = part.rowEnd,
+                    partTopOffsetPx = part.topOffsetPx,
+                    mergeInfo = mergeInfo,
+                    autoWrapOverflowText = options.autoWrapOverflowText,
+                    autoWrapMinTextLength = options.autoWrapMinTextLength,
+                    autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
+                    minFontPt = options.minFontPt,
+                    maxFontPt = options.maxFontPt,
+                )
+
+                pdf.finishPage(page)
+            }
+
+            pdf.writeTo(out)
+        } finally {
+            pdf.close()
+        }
+
+        return PdfWriteResult(
+            pageCount = parts.size,
+            wasSplit = parts.size > 1,
             warnings = warnings.distinct(),
         )
     }
@@ -601,7 +1041,7 @@ object ExcelBitmapRenderer {
                             ))
                 if (!wrap) continue
 
-                val lineCount = countLinesForLayout(rawText, paint, availableWidth, wrap)
+                val lineCount = countLinesForLayout(rawText, paint, availableWidth, true)
                 val required = ceil(padding * 2 + lineCount * paint.fontSpacing).toInt()
 
                 val capped = min(required, maxAutoRowHeightPx)
@@ -782,7 +1222,11 @@ object ExcelBitmapRenderer {
 
         if (totalHeight <= 0) return emptyList()
 
-        val maxHeightByPixels = max(200, (maxTotalPixels / scaledWidthPx.toLong()).toInt())
+        val maxHeightByPixels = run {
+            val h = maxTotalPixels / scaledWidthPx.toLong()
+            val hInt = if (h > Int.MAX_VALUE.toLong()) Int.MAX_VALUE else h.toInt()
+            max(200, hInt)
+        }
         val partMaxHeight = min(maxBitmapDimension, maxHeightByPixels)
 
         val parts = mutableListOf<PartPlan>()
@@ -1017,13 +1461,14 @@ object ExcelBitmapRenderer {
         val originalTextSize = paint.textSize
         var lines = layoutLines()
 
-        val minSize = max(8f, originalTextSize * 0.65f)
+        val minSizeWidth = max(8f, originalTextSize * 0.80f)
+        val minSizeHeight = max(8f, originalTextSize * 0.70f)
 
         // When not wrapping, try to shrink to fit width to avoid truncation (e.g., long numbers).
         if (!wrap && availableWidth > 0f && lines.isNotEmpty()) {
             var maxLineWidth = lines.maxOf { paint.measureText(it) }
             var tries = 0
-            while (maxLineWidth > availableWidth && paint.textSize > minSize && tries < 8) {
+            while (maxLineWidth > availableWidth && paint.textSize > minSizeWidth && tries < 8) {
                 paint.textSize *= 0.9f
                 maxLineWidth = lines.maxOf { paint.measureText(it) }
                 tries++
@@ -1032,18 +1477,26 @@ object ExcelBitmapRenderer {
 
         // If wrapped/multiline text doesn't fit vertically, shrink a bit to avoid overlap.
         if (availableHeight > 0f) {
-            var totalTextHeight = lines.size * paint.fontSpacing
+            fun calcTotalHeight(lineCount: Int): Float {
+                if (lineCount <= 1) {
+                    val fm = paint.fontMetrics
+                    return fm.descent - fm.ascent
+                }
+                return lineCount * paint.fontSpacing
+            }
+
+            var totalTextHeight = calcTotalHeight(lines.size)
             var tries = 0
-            while (totalTextHeight > availableHeight && paint.textSize > minSize && tries < 8) {
+            while (totalTextHeight > availableHeight && paint.textSize > minSizeHeight && tries < 8) {
                 paint.textSize *= 0.9f
                 lines = layoutLines()
-                totalTextHeight = lines.size * paint.fontSpacing
+                totalTextHeight = calcTotalHeight(lines.size)
                 tries++
             }
         }
 
         val fm = paint.fontMetrics
-        val lineHeight = paint.fontSpacing
+        val lineHeight = if (lines.size <= 1) (fm.descent - fm.ascent) else paint.fontSpacing
         val totalTextHeight = lines.size * lineHeight
 
         val startY = when (alignV) {
@@ -1119,9 +1572,18 @@ object ExcelBitmapRenderer {
     ): Boolean {
         if (availableWidth <= 0f) return false
         val t = text.trim()
+        if (t.isEmpty()) return false
+
+        val width = measureMaxLineWidthPx(t, paint)
+        if (width <= availableWidth * 1.05f) return false
+
+        // If keeping one-line would require shrinking too much, prefer wrapping even if Excel didn't.
+        val requiredScale = if (width > 0f) availableWidth / width else 1f
+        if (requiredScale < 0.80f) return true
+
         if (t.length < minTextLength) return false
         if (excludeNumeric && looksNumeric(t)) return false
-        return measureMaxLineWidthPx(t, paint) > availableWidth * 1.05f
+        return true
     }
 
     private fun applyFont(paint: Paint, font: Font, scale: Float, minPt: Int = 8, maxPt: Int = 28) {
