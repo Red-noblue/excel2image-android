@@ -1,6 +1,9 @@
 package com.zys.excel2image
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -10,6 +13,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AlertDialog
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.snackbar.Snackbar
@@ -189,30 +193,46 @@ class MainActivity : AppCompatActivity() {
         updateButtons()
 
         renderJob = lifecycleScope.launch {
-            val renderResult = withContext(Dispatchers.Default) {
-                ExcelBitmapRenderer.renderSheet(
-                    workbook = wb,
-                    sheetIndex = currentSheetIndex,
-                    options = RenderOptions(scale = 0.7f),
-                )
+            val result = withContext(Dispatchers.Default) {
+                runCatching {
+                    // Preview should be lightweight to avoid OOM on large sheets.
+                    ExcelBitmapRenderer.renderSheet(
+                        workbook = wb,
+                        sheetIndex = currentSheetIndex,
+                        options = RenderOptions(
+                            scale = 0.6f,
+                            maxBitmapDimension = 4096,
+                            maxTotalPixels = 8_000_000L,
+                        ),
+                    )
+                }
             }
 
             binding.progress.isVisible = false
-            val bmp = renderResult.bitmaps.firstOrNull()
-            previewBitmap?.recycle()
-            previewBitmap = bmp
-            binding.imgPreview.setImageBitmap(bmp)
-            // Free additional parts if preview got split unexpectedly.
-            renderResult.bitmaps.drop(1).forEach { it.recycle() }
 
-            binding.txtStatus.text = buildString {
-                append("预览：")
-                append(wb.getSheetAt(currentSheetIndex).sheetName)
-                if (renderResult.wasSplit) append("（预览已分段）")
-                if (renderResult.warnings.isNotEmpty()) {
-                    append("  ")
-                    append(renderResult.warnings.joinToString("；"))
+            result.onSuccess { renderResult ->
+                val bmp = renderResult.bitmaps.firstOrNull()
+                previewBitmap?.recycle()
+                previewBitmap = bmp
+                binding.imgPreview.setImageBitmap(bmp)
+                // Free additional parts if preview got split unexpectedly.
+                renderResult.bitmaps.drop(1).forEach { it.recycle() }
+
+                binding.txtStatus.text = buildString {
+                    append("预览：")
+                    append(wb.getSheetAt(currentSheetIndex).sheetName)
+                    if (renderResult.wasSplit) append("（预览已分段）")
+                    if (renderResult.warnings.isNotEmpty()) {
+                        append("  ")
+                        append(renderResult.warnings.joinToString("；"))
+                    }
                 }
+            }.onFailure { e ->
+                previewBitmap?.recycle()
+                previewBitmap = null
+                binding.imgPreview.setImageDrawable(null)
+                binding.txtStatus.text = "预览失败：${e.message ?: e.javaClass.simpleName}"
+                showErrorDialog("预览失败", e)
             }
 
             updateButtons()
@@ -234,7 +254,11 @@ class MainActivity : AppCompatActivity() {
                         workbook = wb,
                         sheetIndex = currentSheetIndex,
                         baseName = workbookName,
-                        options = RenderOptions(scale = 1.4f),
+                        options = RenderOptions(
+                            scale = 1.4f,
+                            maxBitmapDimension = 16_000,
+                            maxTotalPixels = 20_000_000L,
+                        ),
                     )
                 }
             }
@@ -250,6 +274,7 @@ class MainActivity : AppCompatActivity() {
             }.onFailure { e ->
                 binding.txtStatus.text = "导出失败：${e.message ?: e.javaClass.simpleName}"
                 showMessage("导出失败：${e.message ?: e.javaClass.simpleName}")
+                showErrorDialog("导出失败", e)
                 updateButtons()
             }
         }
@@ -292,5 +317,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun showMessage(msg: String) {
         Snackbar.make(binding.root, msg, Snackbar.LENGTH_LONG).show()
+    }
+
+    private fun showErrorDialog(title: String, t: Throwable) {
+        val details = (t.stackTraceToString()).take(10_000)
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(details)
+            .setPositiveButton("复制") { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("error", details))
+                showMessage("已复制错误信息")
+            }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 }

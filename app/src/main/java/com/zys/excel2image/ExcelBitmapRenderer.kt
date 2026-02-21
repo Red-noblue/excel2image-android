@@ -15,9 +15,6 @@ import org.apache.poi.ss.usermodel.Sheet
 import org.apache.poi.ss.usermodel.VerticalAlignment
 import org.apache.poi.ss.usermodel.Workbook
 import org.apache.poi.ss.util.CellRangeAddress
-import org.apache.poi.xssf.usermodel.XSSFCellStyle
-import org.apache.poi.xssf.usermodel.XSSFColor
-import org.apache.poi.xssf.usermodel.XSSFFont
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -81,13 +78,11 @@ object ExcelBitmapRenderer {
         fun scaledSum(arr: IntArray): Int = arr.sumOf { (it * scale).toInt() }
 
         var width = scaledSum(baseColWidthsPx)
-        var height = scaledSum(baseRowHeightsPx)
 
         if (width > options.maxBitmapDimension) {
             val shrink = options.maxBitmapDimension.toFloat() / width.toFloat()
             scale *= shrink
             width = scaledSum(baseColWidthsPx)
-            height = scaledSum(baseRowHeightsPx)
         }
 
         val warnings = mutableListOf<String>()
@@ -511,38 +506,36 @@ object ExcelBitmapRenderer {
             font.italic -> Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
             else -> Typeface.DEFAULT
         }
-
-        val xssfFont = font as? XSSFFont
-        val argb = xssfFont?.xssfColor?.let(::xssfColorToArgb)
-        paint.color = argb ?: Color.BLACK
+        // Avoid resolving XSSF font colors: XSSFColor references java.awt which isn't on Android.
+        paint.color = Color.BLACK
     }
 
     private fun backgroundColorArgb(style: org.apache.poi.ss.usermodel.CellStyle): Int? {
         if (style.fillPattern == FillPatternType.NO_FILL) return null
-        val xStyle = style as? XSSFCellStyle ?: return null
-        val xColor = xStyle.fillForegroundColorColor as? XSSFColor ?: return null
         // Only treat as background when it's actually solid.
-        if (xStyle.fillPattern != FillPatternType.SOLID_FOREGROUND) return null
-        return xssfColorToArgb(xColor)
+        if (style.fillPattern != FillPatternType.SOLID_FOREGROUND) return null
+
+        // Use indexed colors only. Custom XSSF colors require XSSFColor which references java.awt.
+        val idx = style.fillForegroundColor.toInt() and 0xFF
+        return indexedColorToArgb(idx)
     }
 
-    private fun xssfColorToArgb(color: XSSFColor): Int? {
-        val argb = color.argb
-        if (argb != null && argb.size == 4) {
-            val a = argb[0].toInt() and 0xFF
-            val r = argb[1].toInt() and 0xFF
-            val g = argb[2].toInt() and 0xFF
-            val b = argb[3].toInt() and 0xFF
-            return Color.argb(a, r, g, b)
+    private fun indexedColorToArgb(idx: Int): Int? {
+        // HSSF/XSSF share the same indices for the basic palette.
+        // We only map the common ones; unknown indices fall back to "no fill".
+        return when (idx) {
+            8 -> Color.BLACK
+            9 -> Color.WHITE
+            10 -> Color.RED
+            11 -> Color.rgb(0, 255, 0) // bright green
+            12 -> Color.BLUE
+            13 -> Color.YELLOW
+            14 -> Color.MAGENTA
+            15 -> Color.CYAN
+            22 -> Color.rgb(192, 192, 192) // grey 25%
+            23 -> Color.rgb(128, 128, 128) // grey 50%
+            else -> null
         }
-        val rgb = color.rgb
-        if (rgb != null && rgb.size == 3) {
-            val r = rgb[0].toInt() and 0xFF
-            val g = rgb[1].toInt() and 0xFF
-            val b = rgb[2].toInt() and 0xFF
-            return Color.rgb(r, g, b)
-        }
-        return null
     }
 
     private fun cellKey(row: Int, col: Int): Long {
