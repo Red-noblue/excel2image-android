@@ -55,6 +55,9 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            // Allow installing Debug and Release side-by-side (different package name / signature).
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
         }
     }
 

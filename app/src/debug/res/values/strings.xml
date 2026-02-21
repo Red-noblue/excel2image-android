@@ -1,0 +1,5 @@
+<resources>
+    <!-- Distinguish Debug build from Release on the launcher + share sheet. -->
+    <string name="app_name">Excel转图片 Debug</string>
+</resources>
+
