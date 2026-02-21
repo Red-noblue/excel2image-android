@@ -42,12 +42,11 @@ jobs:
         run: |
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > excel2image.jks
-            cat > keystore.properties <<EOF
-            storeFile=excel2image.jks
-            storePassword=$ANDROID_KEYSTORE_PASSWORD
-            keyAlias=$ANDROID_KEY_ALIAS
-            keyPassword=$ANDROID_KEY_PASSWORD
-            EOF
+            printf "storeFile=excel2image.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n" \
+              "$ANDROID_KEYSTORE_PASSWORD" \
+              "$ANDROID_KEY_ALIAS" \
+              "$ANDROID_KEY_PASSWORD" \
+              > keystore.properties
             echo "Signing: using release keystore from GitHub Secrets." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
