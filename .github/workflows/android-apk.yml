@@ -40,17 +40,36 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "No signing secrets configured; using debug signing." >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > excel2image.jks
+            cat > keystore.properties <<EOF
+            storeFile=excel2image.jks
+            storePassword=$ANDROID_KEYSTORE_PASSWORD
+            keyAlias=$ANDROID_KEY_ALIAS
+            keyPassword=$ANDROID_KEY_PASSWORD
+            EOF
+            echo "Signing: using release keystore from GitHub Secrets." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > excel2image.jks
-          cat > keystore.properties <<EOF
-          storeFile=excel2image.jks
-          storePassword=$ANDROID_KEYSTORE_PASSWORD
-          keyAlias=$ANDROID_KEY_ALIAS
-          keyPassword=$ANDROID_KEY_PASSWORD
-          EOF
+
+          # No secrets configured: generate a debug keystore so `assembleRelease` can still run.
+          # NOTE: This keystore is ephemeral on GitHub-hosted runners. Each build will have a different
+          # signature, so installing a new build may require uninstalling the old one first.
+          echo "Signing: no secrets found; generating an ephemeral debug keystore." >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$HOME/.android" "$HOME/.config/.android"
+          for ks in "$HOME/.android/debug.keystore" "$HOME/.config/.android/debug.keystore"; do
+            if [ ! -f "$ks" ]; then
+              keytool -genkeypair -noprompt \
+                -keystore "$ks" \
+                -storepass android \
+                -alias androiddebugkey \
+                -keypass android \
+                -dname "CN=Android Debug,O=Android,C=US" \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 36500
+            fi
+          done
 
       - name: Build (Release)
         run: ./gradlew :app:assembleRelease
