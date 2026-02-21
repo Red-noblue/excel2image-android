@@ -33,13 +33,17 @@ jobs:
           yes | sdkmanager --licenses > /dev/null
 
       - name: Prepare signing (optional)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No signing secrets configured; using debug signing." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > excel2image.jks
           cat > keystore.properties <<EOF
           storeFile=excel2image.jks
@@ -63,4 +67,3 @@ jobs:
         with:
           name: app-release-apk
           path: app/build/outputs/apk/release/*.apk
-
