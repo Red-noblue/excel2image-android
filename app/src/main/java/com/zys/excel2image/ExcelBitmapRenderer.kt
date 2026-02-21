@@ -6,7 +6,9 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import org.apache.poi.ss.usermodel.Cell
 import org.apache.poi.ss.usermodel.BorderStyle
+import org.apache.poi.ss.usermodel.CellType
 import org.apache.poi.ss.usermodel.DataFormatter
 import org.apache.poi.ss.usermodel.FillPatternType
 import org.apache.poi.ss.usermodel.Font
@@ -18,6 +20,7 @@ import org.apache.poi.ss.util.CellRangeAddress
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class RenderOptions(
     val scale: Float,
@@ -57,17 +60,20 @@ object ExcelBitmapRenderer {
 
         val (firstRow, lastRow, firstCol, lastCol) = used
 
+        val maxDigitWidthPx = computeMaxDigitWidthPx(workbook)
         val baseColWidthsPx = IntArray(lastCol - firstCol + 1) { idx ->
             val col = firstCol + idx
+            if (sheet.isColumnHidden(col)) return@IntArray 0
             // Excel column width is in 1/256 character units. This is an approximation that works
             // well enough for "shareable images" without pulling AWT font metrics.
             val widthChars = sheet.getColumnWidth(col) / 256f
-            max(12, (widthChars * 7f + 5f).toInt())
+            max(12, (widthChars * maxDigitWidthPx + 5f).roundToInt())
         }
 
         val baseRowHeightsPx = IntArray(lastRow - firstRow + 1) { idx ->
             val rowNum = firstRow + idx
             val row = sheet.getRow(rowNum)
+            if (row?.zeroHeight == true) return@IntArray 0
             val htPt = row?.heightInPoints ?: sheet.defaultRowHeightInPoints
             max(16, ceil(htPt * 4f / 3f).toInt())
         }
@@ -99,6 +105,17 @@ object ExcelBitmapRenderer {
             maxBitmapDimension = options.maxBitmapDimension,
             maxTotalPixels = options.maxTotalPixels,
         )
+        if (parts.isEmpty()) {
+            val bmp = Bitmap.createBitmap(800, 400, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(Color.WHITE)
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.DKGRAY
+                textSize = 36f
+            }
+            canvas.drawText("无可见内容（可能都被隐藏）", 40f, 120f, p)
+            return RenderResult(bitmaps = listOf(bmp), wasSplit = false, warnings = warnings)
+        }
 
         val formatter = DataFormatter()
         val evaluator = workbook.creationHelper.createFormulaEvaluator()
@@ -252,7 +269,9 @@ object ExcelBitmapRenderer {
         maxBitmapDimension: Int,
         maxTotalPixels: Long,
     ): List<PartPlan> {
-        val scaledRowHeights = baseRowHeightsPx.map { max(1, (it * scale).toInt()) }
+        val scaledRowHeights = baseRowHeightsPx.map { h ->
+            if (h <= 0) 0 else max(1, (h * scale).toInt())
+        }
         val totalHeight = scaledRowHeights.sum()
 
         // Single-part fast path.
@@ -269,6 +288,8 @@ object ExcelBitmapRenderer {
                 ),
             )
         }
+
+        if (totalHeight <= 0) return emptyList()
 
         val maxHeightByPixels = max(200, (maxTotalPixels / scaledWidthPx.toLong()).toInt())
         val partMaxHeight = min(maxBitmapDimension, maxHeightByPixels)
@@ -329,8 +350,14 @@ object ExcelBitmapRenderer {
         val colCount = lastCol - firstCol + 1
         val rowCount = lastRow - firstRow + 1
 
-        val colWidths = IntArray(colCount) { idx -> max(1, (baseColWidthsPx[idx] * scale).toInt()) }
-        val rowHeights = IntArray(rowCount) { idx -> max(1, (baseRowHeightsPx[idx] * scale).toInt()) }
+        val colWidths = IntArray(colCount) { idx ->
+            val base = baseColWidthsPx[idx]
+            if (base <= 0) 0 else max(1, (base * scale).toInt())
+        }
+        val rowHeights = IntArray(rowCount) { idx ->
+            val base = baseRowHeightsPx[idx]
+            if (base <= 0) 0 else max(1, (base * scale).toInt())
+        }
 
         val x = IntArray(colCount + 1)
         for (i in 0 until colCount) x[i + 1] = x[i] + colWidths[i]
@@ -369,6 +396,7 @@ object ExcelBitmapRenderer {
             val rowIdx = absRow - firstRow
             val top = y[rowIdx] - partTopOffsetPx
             val bottom = y[rowIdx + 1] - partTopOffsetPx
+            if (bottom <= top) continue
 
             val row = sheet.getRow(absRow)
 
@@ -376,6 +404,7 @@ object ExcelBitmapRenderer {
                 val colIdx = absCol - firstCol
                 val left = x[colIdx]
                 val right = x[colIdx + 1]
+                if (right <= left) continue
 
                 val key = cellKey(absRow, absCol)
                 val merge = cellToMerge[key]
@@ -458,7 +487,40 @@ object ExcelBitmapRenderer {
         wrap: Boolean,
     ) {
         val availableWidth = max(0f, rect.width() - padding * 2)
-        val lines = if (wrap) breakLines(text, paint, availableWidth) else listOf(text)
+        val availableHeight = max(0f, rect.height() - padding * 2)
+
+        fun layoutLines(): List<String> {
+            // Newlines in Excel cell text should always produce new visual lines.
+            val paragraphs = text.split("\r\n", "\n", "\r")
+            if (paragraphs.isEmpty()) return emptyList()
+
+            val out = ArrayList<String>()
+            for (para in paragraphs) {
+                if (!wrap || availableWidth <= 0f) {
+                    out.add(para)
+                } else {
+                    out.addAll(breakSingleLine(para, paint, availableWidth))
+                }
+            }
+            return out
+        }
+
+        // First pass layout.
+        val originalTextSize = paint.textSize
+        var lines = layoutLines()
+
+        // If wrapped/multiline text doesn't fit vertically, shrink a bit to avoid overlap.
+        if (availableHeight > 0f) {
+            var totalTextHeight = lines.size * paint.fontSpacing
+            var tries = 0
+            val minSize = max(8f, originalTextSize * 0.65f)
+            while (totalTextHeight > availableHeight && paint.textSize > minSize && tries < 8) {
+                paint.textSize *= 0.9f
+                lines = layoutLines()
+                totalTextHeight = lines.size * paint.fontSpacing
+                tries++
+            }
+        }
 
         val fm = paint.fontMetrics
         val lineHeight = paint.fontSpacing
@@ -470,20 +532,27 @@ object ExcelBitmapRenderer {
             else -> rect.centerY() - totalTextHeight / 2f - fm.ascent
         }
 
-        for ((i, line) in lines.withIndex()) {
-            val y = startY + i * lineHeight
-            val lineWidth = paint.measureText(line)
-            val x = when (alignH) {
-                HorizontalAlignment.RIGHT -> rect.right - padding - lineWidth
-                HorizontalAlignment.CENTER -> rect.centerX() - lineWidth / 2f
-                else -> rect.left + padding
+        // Clip to cell bounds so text never bleeds into other cells/rows.
+        val save = canvas.save()
+        canvas.clipRect(rect)
+        try {
+            for ((i, line) in lines.withIndex()) {
+                val y = startY + i * lineHeight
+                val lineWidth = paint.measureText(line)
+                val x = when (alignH) {
+                    HorizontalAlignment.RIGHT -> rect.right - padding - lineWidth
+                    HorizontalAlignment.CENTER -> rect.centerX() - lineWidth / 2f
+                    else -> rect.left + padding
+                }
+                canvas.drawText(line, x, y, paint)
             }
-            canvas.drawText(line, x, y, paint)
+        } finally {
+            canvas.restoreToCount(save)
         }
     }
 
-    private fun breakLines(text: String, paint: Paint, maxWidth: Float): List<String> {
-        if (text.isEmpty()) return emptyList()
+    private fun breakSingleLine(text: String, paint: Paint, maxWidth: Float): List<String> {
+        if (text.isEmpty()) return listOf("")
         if (maxWidth <= 0f) return listOf(text)
 
         val out = ArrayList<String>()
@@ -494,20 +563,70 @@ object ExcelBitmapRenderer {
             out.add(text.substring(start, start + count))
             start += count
         }
-        return out
+        // Safety: avoid returning empty on weird measurement results.
+        return if (out.isNotEmpty()) out else listOf(text)
     }
 
     private fun applyFont(paint: Paint, font: Font, scale: Float) {
         val basePx = max(10f, font.fontHeightInPoints * 4f / 3f)
         paint.textSize = basePx * scale
-        paint.typeface = when {
-            font.bold && font.italic -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC)
-            font.bold -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            font.italic -> Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
-            else -> Typeface.DEFAULT
+        val style = when {
+            font.bold && font.italic -> Typeface.BOLD_ITALIC
+            font.bold -> Typeface.BOLD
+            font.italic -> Typeface.ITALIC
+            else -> Typeface.NORMAL
         }
+        paint.typeface = androidTypefaceFor(font.fontName, style)
         // Avoid resolving XSSF font colors: XSSFColor references java.awt which isn't on Android.
         paint.color = Color.BLACK
+    }
+
+    private fun androidTypefaceFor(fontName: String?, style: Int): Typeface {
+        val name = (fontName ?: "").trim()
+        if (name.isEmpty()) return Typeface.create(Typeface.DEFAULT, style)
+
+        val lower = name.lowercase()
+        val family = when {
+            lower.contains("courier") || lower.contains("consolas") || lower.contains("mono") -> Typeface.MONOSPACE
+            lower.contains("times") || lower.contains("serif") || lower.contains("roman") -> Typeface.SERIF
+            // Common Chinese fonts on Windows/macOS.
+            lower.contains("yahei") || name.contains("微软雅黑") -> Typeface.SANS_SERIF
+            lower.contains("simsun") || name.contains("宋体") -> Typeface.SERIF
+            lower.contains("simhei") || name.contains("黑体") -> Typeface.SANS_SERIF
+            else -> Typeface.SANS_SERIF
+        }
+        return Typeface.create(family, style)
+    }
+
+    private fun computeMaxDigitWidthPx(workbook: Workbook): Float {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val font = runCatching { workbook.getFontAt(0.toShort()) }.getOrNull()
+        if (font != null) {
+            applyFont(paint, font, 1f)
+        } else {
+            paint.textSize = 14f
+            paint.typeface = Typeface.DEFAULT
+        }
+
+        val mdw = paint.measureText("0")
+        return if (mdw.isFinite() && mdw > 0f) mdw else 7f
+    }
+
+    @Suppress("unused")
+    private fun isCellVisuallyUsed(cell: Cell): Boolean {
+        // Heuristic used for future "auto-trim" improvements.
+        return when (cell.cellType) {
+            CellType.STRING -> cell.stringCellValue?.isNotBlank() == true
+            CellType.BLANK -> {
+                val style = cell.cellStyle
+                style.fillPattern != FillPatternType.NO_FILL ||
+                    style.borderTop != BorderStyle.NONE ||
+                    style.borderRight != BorderStyle.NONE ||
+                    style.borderBottom != BorderStyle.NONE ||
+                    style.borderLeft != BorderStyle.NONE
+            }
+            else -> true
+        }
     }
 
     private fun backgroundColorArgb(style: org.apache.poi.ss.usermodel.CellStyle): Int? {
