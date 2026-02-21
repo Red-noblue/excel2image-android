@@ -12,7 +12,9 @@ android {
 
     defaultConfig {
         applicationId = "com.zys.excel2image"
-        minSdk = 23
+        // Apache POI 5.x requires Java 8+ runtime features that are only fully supported on Android 8.0+.
+        // (D8 will fail dexing for lower API levels due to MethodHandle.invoke usage.)
+        minSdk = 26
         targetSdk = 34
 
         versionCode = 1
