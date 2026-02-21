@@ -42,7 +42,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
+            // Keep it simple for the first public test builds.
+            // Apache POI is large and uses some reflection; minification can break things.
+            isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
