@@ -874,7 +874,7 @@ object ExcelBitmapRenderer {
 
     private fun computeMaxDigitWidthPx(workbook: Workbook): Float {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        val font = runCatching { workbook.getFontAt(0.toShort()) }.getOrNull()
+        val font = runCatching { workbook.getFontAt(0) }.getOrNull()
         if (font != null) {
             applyFont(paint, font, 1f)
         } else {
