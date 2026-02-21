@@ -29,11 +29,22 @@ data class RenderOptions(
     // "Share clear (tight)" helpers.
     val trimBlankEdges: Boolean = true,
     val autoFitRowHeights: Boolean = true,
+    val adaptiveColumnWidths: Boolean = true,
+    val autoWrapOverflowText: Boolean = true,
     // Safety limits to avoid heavy scanning on huge sheets.
     val trimMaxCells: Int = 120_000,
+    val columnWidthMaxCells: Int = 120_000,
     val autoFitMaxCells: Int = 120_000,
+    val columnWidthSampleMaxTextLength: Int = 30,
+    val minColumnWidthPx: Int = 12,
+    val emptyColumnWidthPx: Int = 24,
+    val maxColumnWidthPx: Int = 800,
+    val autoWrapMinTextLength: Int = 12,
+    val autoWrapExcludeNumeric: Boolean = true,
     // Cap auto row height growth in *base* pixels (before applying `scale`).
     val maxAutoRowHeightPx: Int = 1200,
+    val minFontPt: Int = 8,
+    val maxFontPt: Int = 28,
 )
 
 data class RenderResult(
@@ -87,14 +98,43 @@ object ExcelBitmapRenderer {
 
         val (firstRow, lastRow, firstCol, lastCol) = used
 
+        val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
+
         val maxDigitWidthPx = computeMaxDigitWidthPx(workbook)
-        val baseColWidthsPx = IntArray(lastCol - firstCol + 1) { idx ->
+        val baseColWidthsPxRaw = IntArray(lastCol - firstCol + 1) { idx ->
             val col = firstCol + idx
             if (sheet.isColumnHidden(col)) return@IntArray 0
             // Excel column width is in 1/256 character units. This is an approximation that works
             // well enough for "shareable images" without pulling AWT font metrics.
             val widthChars = sheet.getColumnWidth(col) / 256f
             max(12, (widthChars * maxDigitWidthPx + 5f).roundToInt())
+        }
+
+        val baseColWidthsPx = if (options.adaptiveColumnWidths) {
+            val fit = adaptColumnWidthsPx(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                baseColWidthsPx = baseColWidthsPxRaw,
+                mergeInfo = mergeInfo,
+                maxCells = options.columnWidthMaxCells,
+                sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
+                minColumnWidthPx = options.minColumnWidthPx,
+                emptyColumnWidthPx = options.emptyColumnWidthPx,
+                maxColumnWidthPx = options.maxColumnWidthPx,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            if (fit.didChange) warnings += "已自动调整列宽"
+            fit.colWidthsPx
+        } else {
+            baseColWidthsPxRaw
         }
 
         val baseRowHeightsPxRaw = IntArray(lastRow - firstRow + 1) { idx ->
@@ -104,8 +144,6 @@ object ExcelBitmapRenderer {
             val htPt = row?.heightInPoints ?: sheet.defaultRowHeightInPoints
             max(16, ceil(htPt * 4f / 3f).toInt())
         }
-
-        val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
 
         val baseRowHeightsPx = if (options.autoFitRowHeights) {
             val fit = autoFitRowHeightsPx(
@@ -122,6 +160,11 @@ object ExcelBitmapRenderer {
                 mergeInfo = mergeInfo,
                 maxCells = options.autoFitMaxCells,
                 maxAutoRowHeightPx = options.maxAutoRowHeightPx,
+                autoWrapOverflowText = options.autoWrapOverflowText,
+                autoWrapMinTextLength = options.autoWrapMinTextLength,
+                autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
             )
             fit.warning?.let { warnings += it }
             if (fit.didChange) warnings += "已自动调整行高以适配换行"
@@ -189,6 +232,11 @@ object ExcelBitmapRenderer {
                 partRowEnd = part.rowEnd,
                 partTopOffsetPx = part.topOffsetPx,
                 mergeInfo = mergeInfo,
+                autoWrapOverflowText = options.autoWrapOverflowText,
+                autoWrapMinTextLength = options.autoWrapMinTextLength,
+                autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
             )
 
             if (parts.size > 1 && partIndex == 0) {
@@ -293,6 +341,159 @@ object ExcelBitmapRenderer {
         return TrimOutcome(range = trimmed, didTrim = trimmed != range)
     }
 
+    private data class ColumnWidthOutcome(
+        val colWidthsPx: IntArray,
+        val didChange: Boolean,
+        val warning: String? = null,
+    )
+
+    private fun adaptColumnWidthsPx(
+        workbook: Workbook,
+        sheet: Sheet,
+        formatter: DataFormatter,
+        evaluator: org.apache.poi.ss.usermodel.FormulaEvaluator,
+        firstRow: Int,
+        lastRow: Int,
+        firstCol: Int,
+        lastCol: Int,
+        baseColWidthsPx: IntArray,
+        mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+        maxCells: Int,
+        sampleMaxTextLength: Int,
+        minColumnWidthPx: Int,
+        emptyColumnWidthPx: Int,
+        maxColumnWidthPx: Int,
+        minFontPt: Int,
+        maxFontPt: Int,
+    ): ColumnWidthOutcome {
+        val (cellToMerge, mergeStarts) = mergeInfo
+        val colCount = lastCol - firstCol + 1
+        if (colCount <= 0) return ColumnWidthOutcome(colWidthsPx = baseColWidthsPx, didChange = false)
+
+        // Keep per-column samples small to avoid memory blowups on large sheets.
+        val maxSamplesPerCol = 64
+        val samples = Array(colCount) { IntArray(maxSamplesPerCol) }
+        val sampleCounts = IntArray(colCount)
+        val hasAnyText = BooleanArray(colCount)
+        val minFromMergedSpans = IntArray(colCount)
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        val padding = 4f
+
+        var processed = 0
+
+        val rowIt = sheet.rowIterator()
+        while (rowIt.hasNext()) {
+            val row = rowIt.next()
+            val r = row.rowNum
+            if (r < firstRow || r > lastRow) continue
+            if (row.zeroHeight) continue
+
+            val cellIt = row.cellIterator()
+            while (cellIt.hasNext()) {
+                val cell = cellIt.next()
+                val c = cell.columnIndex
+                if (c < firstCol || c > lastCol) continue
+                if (sheet.isColumnHidden(c)) continue
+
+                processed++
+                if (processed > maxCells) {
+                    return ColumnWidthOutcome(
+                        colWidthsPx = baseColWidthsPx,
+                        didChange = false,
+                        warning = "表格较大，已跳过自适应列宽",
+                    )
+                }
+
+                val text =
+                    runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty().trim()
+                if (text.isEmpty()) continue
+
+                val key = cellKey(r, c)
+                val merge = cellToMerge[key]
+                if (merge != null && key !in mergeStarts) {
+                    continue
+                }
+
+                // Only consider the first cell for merged regions to avoid double-counting.
+                val spanFirstCol = merge?.firstCol ?: c
+                val spanLastCol = merge?.lastCol ?: c
+                if (spanFirstCol < firstCol || spanLastCol > lastCol) continue
+                if (spanFirstCol != c) continue
+
+                // Measure using the cell's font (clamped) so the estimate matches rendering.
+                val font = workbook.getFontAt(cell.cellStyle.fontIndex)
+                applyFont(paint, font, 1f, minFontPt, maxFontPt)
+
+                val measured = measureMaxLineWidthPx(text, paint)
+                val measuredWithPadding = ceil(measured + padding * 2).toInt()
+
+                if (spanFirstCol != spanLastCol) {
+                    // Distribute merged-cell width across its spanned columns (best-effort).
+                    val span = (spanLastCol - spanFirstCol + 1).coerceAtLeast(1)
+                    val perCol = ceil(measuredWithPadding.toFloat() / span.toFloat()).toInt()
+                    for (absCol in spanFirstCol..spanLastCol) {
+                        val idx = absCol - firstCol
+                        if (idx in 0 until colCount) {
+                            hasAnyText[idx] = true
+                            minFromMergedSpans[idx] = max(minFromMergedSpans[idx], perCol)
+                        }
+                    }
+                    continue
+                }
+
+                val colIdx = c - firstCol
+                if (colIdx !in 0 until colCount) continue
+                hasAnyText[colIdx] = true
+
+                // Ignore extremely long texts when deciding column width; those will be wrapped.
+                if (text.length > sampleMaxTextLength) continue
+
+                val count = sampleCounts[colIdx]
+                if (count < maxSamplesPerCol) {
+                    samples[colIdx][count] = measuredWithPadding
+                    sampleCounts[colIdx] = count + 1
+                }
+            }
+        }
+
+        val out = baseColWidthsPx.clone()
+        var changed = false
+
+        for (i in 0 until colCount) {
+            val base = baseColWidthsPx[i]
+            if (base <= 0) {
+                out[i] = 0
+                continue
+            }
+
+            val newWidth = if (!hasAnyText[i]) {
+                min(base, emptyColumnWidthPx).coerceAtLeast(minColumnWidthPx)
+            } else {
+                val count = sampleCounts[i]
+                val typical = if (count <= 0) {
+                    // Fallback for "all texts are long": keep it moderate, don't force huge columns.
+                    min(base, 220).coerceAtLeast(minColumnWidthPx)
+                } else {
+                    val arr = samples[i].copyOf(count)
+                    arr.sort()
+                    val idx = ((count - 1) * 0.8f).toInt().coerceIn(0, count - 1)
+                    arr[idx].coerceAtLeast(minColumnWidthPx)
+                }
+
+                val withMerged = max(typical, minFromMergedSpans[i])
+                min(base, withMerged).coerceIn(minColumnWidthPx, maxColumnWidthPx)
+            }
+
+            if (newWidth != base) {
+                out[i] = newWidth
+                changed = true
+            }
+        }
+
+        return ColumnWidthOutcome(colWidthsPx = out, didChange = changed)
+    }
+
     private data class AutoFitOutcome(
         val rowHeightsPx: IntArray,
         val didChange: Boolean,
@@ -313,6 +514,11 @@ object ExcelBitmapRenderer {
         mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
         maxCells: Int,
         maxAutoRowHeightPx: Int,
+        autoWrapOverflowText: Boolean,
+        autoWrapMinTextLength: Int,
+        autoWrapExcludeNumeric: Boolean,
+        minFontPt: Int,
+        maxFontPt: Int,
     ): AutoFitOutcome {
         val (cellToMerge, mergeStarts) = mergeInfo
 
@@ -355,9 +561,6 @@ object ExcelBitmapRenderer {
                 val rawText = runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
                 if (rawText.isBlank()) continue
 
-                val wrap = style.wrapText || rawText.contains('\n') || rawText.contains('\r')
-                if (!wrap) continue
-
                 val key = cellKey(r, c)
                 val merge = cellToMerge[key]
                 if (merge != null && key !in mergeStarts) {
@@ -382,9 +585,23 @@ object ExcelBitmapRenderer {
 
                 val availableWidth = max(0f, widthPx.toFloat() - padding * 2)
                 val font = workbook.getFontAt(style.fontIndex)
-                applyFont(paint, font, 1f)
+                applyFont(paint, font, 1f, minFontPt, maxFontPt)
 
-                val lineCount = countLinesForLayout(rawText, paint, availableWidth, style.wrapText)
+                val wrap =
+                    style.wrapText ||
+                        rawText.contains('\n') ||
+                        rawText.contains('\r') ||
+                        (autoWrapOverflowText &&
+                            shouldAutoWrapText(
+                                text = rawText,
+                                paint = paint,
+                                availableWidth = availableWidth,
+                                minTextLength = autoWrapMinTextLength,
+                                excludeNumeric = autoWrapExcludeNumeric,
+                            ))
+                if (!wrap) continue
+
+                val lineCount = countLinesForLayout(rawText, paint, availableWidth, wrap)
                 val required = ceil(padding * 2 + lineCount * paint.fontSpacing).toInt()
 
                 val capped = min(required, maxAutoRowHeightPx)
@@ -618,6 +835,11 @@ object ExcelBitmapRenderer {
         partRowEnd: Int,
         partTopOffsetPx: Int,
         mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+        autoWrapOverflowText: Boolean,
+        autoWrapMinTextLength: Int,
+        autoWrapExcludeNumeric: Boolean,
+        minFontPt: Int,
+        maxFontPt: Int,
     ) {
         val (cellToMerge, mergeStarts) = mergeInfo
 
@@ -727,13 +949,25 @@ object ExcelBitmapRenderer {
                         canvas.drawRect(rect, borderPaint)
                     }
 
-                    val text = formatter.formatCellValue(cell, evaluator).orEmpty()
+                    val text =
+                        runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
                     if (text.isNotBlank()) {
                         val font = workbook.getFontAt(style.fontIndex)
-                        applyFont(textPaint, font, scale)
+                        applyFont(textPaint, font, scale, minFontPt, maxFontPt)
                         val alignH = style.alignment
                         val alignV = style.verticalAlignment
-                        val wrap = style.wrapText
+                        val wrap =
+                            style.wrapText ||
+                                text.contains('\n') ||
+                                text.contains('\r') ||
+                                (autoWrapOverflowText &&
+                                    shouldAutoWrapText(
+                                        text = text,
+                                        paint = textPaint,
+                                        availableWidth = max(0f, rect.width() - padding * 2),
+                                        minTextLength = autoWrapMinTextLength,
+                                        excludeNumeric = autoWrapExcludeNumeric,
+                                    ))
                         drawTextInRect(
                             canvas = canvas,
                             paint = textPaint,
@@ -783,11 +1017,23 @@ object ExcelBitmapRenderer {
         val originalTextSize = paint.textSize
         var lines = layoutLines()
 
+        val minSize = max(8f, originalTextSize * 0.65f)
+
+        // When not wrapping, try to shrink to fit width to avoid truncation (e.g., long numbers).
+        if (!wrap && availableWidth > 0f && lines.isNotEmpty()) {
+            var maxLineWidth = lines.maxOf { paint.measureText(it) }
+            var tries = 0
+            while (maxLineWidth > availableWidth && paint.textSize > minSize && tries < 8) {
+                paint.textSize *= 0.9f
+                maxLineWidth = lines.maxOf { paint.measureText(it) }
+                tries++
+            }
+        }
+
         // If wrapped/multiline text doesn't fit vertically, shrink a bit to avoid overlap.
         if (availableHeight > 0f) {
             var totalTextHeight = lines.size * paint.fontSpacing
             var tries = 0
-            val minSize = max(8f, originalTextSize * 0.65f)
             while (totalTextHeight > availableHeight && paint.textSize > minSize && tries < 8) {
                 paint.textSize *= 0.9f
                 lines = layoutLines()
@@ -841,8 +1087,46 @@ object ExcelBitmapRenderer {
         return if (out.isNotEmpty()) out else listOf(text)
     }
 
-    private fun applyFont(paint: Paint, font: Font, scale: Float) {
-        val basePx = max(10f, font.fontHeightInPoints * 4f / 3f)
+    private fun measureMaxLineWidthPx(text: String, paint: Paint): Float {
+        if (text.isEmpty()) return 0f
+        val lines = text.split("\r\n", "\n", "\r")
+        var maxWidth = 0f
+        for (line in lines) {
+            maxWidth = max(maxWidth, paint.measureText(line))
+        }
+        return maxWidth
+    }
+
+    private fun looksNumeric(text: String): Boolean {
+        val t = text.trim()
+        if (t.isEmpty()) return false
+        for (ch in t) {
+            if (ch.isDigit()) continue
+            when (ch) {
+                '.', ',', '-', '+', '/', '%', '(', ')', ' ', '\u00A0' -> continue
+                else -> return false
+            }
+        }
+        return true
+    }
+
+    private fun shouldAutoWrapText(
+        text: String,
+        paint: Paint,
+        availableWidth: Float,
+        minTextLength: Int,
+        excludeNumeric: Boolean,
+    ): Boolean {
+        if (availableWidth <= 0f) return false
+        val t = text.trim()
+        if (t.length < minTextLength) return false
+        if (excludeNumeric && looksNumeric(t)) return false
+        return measureMaxLineWidthPx(t, paint) > availableWidth * 1.05f
+    }
+
+    private fun applyFont(paint: Paint, font: Font, scale: Float, minPt: Int = 8, maxPt: Int = 28) {
+        val pt = font.fontHeightInPoints.toInt().coerceIn(minPt, maxPt)
+        val basePx = max(10f, pt * 4f / 3f)
         paint.textSize = basePx * scale
         val style = when {
             font.bold && font.italic -> Typeface.BOLD_ITALIC

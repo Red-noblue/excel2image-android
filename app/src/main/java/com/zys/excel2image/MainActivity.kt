@@ -205,6 +205,7 @@ class MainActivity : AppCompatActivity() {
                             maxTotalPixels = 8_000_000L,
                             // Keep preview responsive; export will do a deeper pass.
                             trimMaxCells = 20_000,
+                            columnWidthMaxCells = 20_000,
                             autoFitMaxCells = 20_000,
                             maxAutoRowHeightPx = 900,
                         ),
@@ -264,6 +265,7 @@ class MainActivity : AppCompatActivity() {
                             maxTotalPixels = 20_000_000L,
                             // Export can spend more time to improve readability.
                             trimMaxCells = 250_000,
+                            columnWidthMaxCells = 250_000,
                             autoFitMaxCells = 250_000,
                             maxAutoRowHeightPx = 2000,
                         ),
