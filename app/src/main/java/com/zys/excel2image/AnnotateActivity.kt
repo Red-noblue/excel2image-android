@@ -49,6 +49,13 @@ class AnnotateActivity : AppCompatActivity() {
     private var currentPartIndex = 0
     private var drawMode = false
 
+    private var isGeneratingParts: Boolean = false
+    private var expectedPartCount: Int = 0
+    private var generatedPartCount: Int = 0
+    private var isExporting: Boolean = false
+
+    private lateinit var partsAdapter: ArrayAdapter<String>
+
     // Keep the workbook in memory while this screen is open to avoid re-loading/parsing
     // (Apache POI load is expensive on mobile).
     private var workbook: Workbook? = null
@@ -116,6 +123,13 @@ class AnnotateActivity : AppCompatActivity() {
         binding.btnExportImage.setOnClickListener { exportAnnotatedImages() }
         binding.btnExportPdf.setOnClickListener { exportAnnotatedPdf() }
 
+        partsAdapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            mutableListOf<String>(),
+        )
+        binding.spinnerParts.adapter = partsAdapter
+
         binding.spinnerParts.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
                 if (position != currentPartIndex) {
@@ -146,10 +160,21 @@ class AnnotateActivity : AppCompatActivity() {
     private fun applyModeUi() {
         binding.overlay.drawEnabled = drawMode
         binding.btnMode.text = if (drawMode) "涂鸦" else "移动"
+        val total = when {
+            expectedPartCount > 0 -> expectedPartCount
+            else -> parts.size
+        }
         binding.txtStatus.text = buildString {
             append(sheetName)
-            if (parts.size > 1) append("  第${currentPartIndex + 1}/${parts.size}段")
+            if (total > 1 && parts.isNotEmpty()) append("  第${currentPartIndex + 1}/${total}段")
             append(if (drawMode) "（涂鸦模式）" else "（移动模式）")
+            if (isGeneratingParts) {
+                if (expectedPartCount > 0) {
+                    append("  生成中 ${generatedPartCount}/$expectedPartCount")
+                } else {
+                    append("  生成中…")
+                }
+            }
         }
     }
 
@@ -158,37 +183,70 @@ class AnnotateActivity : AppCompatActivity() {
     }
 
     private fun updateButtons() {
-        val hasParts = parts.isNotEmpty()
+        val hasCurrent = parts.getOrNull(currentPartIndex) != null
         val strokes = parts.getOrNull(currentPartIndex)?.strokes.orEmpty()
-        binding.btnUndo.isEnabled = hasParts && strokes.isNotEmpty() && !binding.progress.isVisible
-        binding.btnClear.isEnabled = hasParts && strokes.isNotEmpty() && !binding.progress.isVisible
-        binding.btnExportImage.isEnabled = hasParts && !binding.progress.isVisible
-        binding.btnExportPdf.isEnabled = hasParts && !binding.progress.isVisible
-        binding.spinnerParts.isEnabled = parts.size > 1 && !binding.progress.isVisible
-        binding.btnMode.isEnabled = hasParts && !binding.progress.isVisible
+
+        // Allow drawing while parts are still generating; but disable interactions while exporting.
+        binding.btnUndo.isEnabled = hasCurrent && strokes.isNotEmpty() && !isExporting
+        binding.btnClear.isEnabled = hasCurrent && strokes.isNotEmpty() && !isExporting
+        binding.btnMode.isEnabled = hasCurrent && !isExporting
+        binding.spinnerParts.isEnabled = parts.size > 1 && !isExporting
+
+        // Only allow exporting when generation is finished (otherwise output would be incomplete).
+        val canExport = parts.isNotEmpty() && !isGeneratingParts && !isExporting
+        binding.btnExportImage.isEnabled = canExport
+        binding.btnExportPdf.isEnabled = canExport
     }
 
     private fun renderPartsToCache(uri: Uri) {
+        // Reset UI
+        isGeneratingParts = true
+        expectedPartCount = 0
+        generatedPartCount = 0
+        parts.clear()
+        partsAdapter.clear()
+        currentPartIndex = 0
+
         binding.progress.isVisible = true
+        binding.progress.isIndeterminate = true
+        binding.progress.progress = 0
         binding.txtStatus.text = "正在生成可标注预览…"
         updateButtons()
 
         lifecycleScope.launch {
-            val result = withContext(Dispatchers.Default) {
+            val loadedResult = withContext(Dispatchers.IO) {
+                runCatching { ExcelLoader.load(contentResolver, uri) }
+            }
+
+            val loaded = loadedResult.getOrElse { e ->
+                isGeneratingParts = false
+                binding.progress.isVisible = false
+                binding.txtStatus.text = "生成失败：${e.message ?: e.javaClass.simpleName}"
+                AlertDialog.Builder(this@AnnotateActivity)
+                    .setTitle("生成失败")
+                    .setMessage((e.stackTraceToString()).take(10_000))
+                    .setPositiveButton("关闭") { _, _ -> finish() }
+                    .show()
+                updateButtons()
+                return@launch
+            }
+
+            workbook?.closeQuietly()
+            workbook = loaded.workbook
+            val safeSheetIndex = sheetIndex.coerceIn(0, loaded.workbook.numberOfSheets - 1)
+            sheetIndex = safeSheetIndex
+            sheetName = loaded.workbook.getSheetAt(safeSheetIndex).sheetName
+            applyModeUi()
+
+            val outDir = withContext(Dispatchers.Default) {
+                File(cacheDir, "annotate").apply { mkdirs() }
+            }
+            // Clear old cache.
+            outDir.listFiles()?.forEach { runCatching { it.delete() } }
+
+            // Render parts in background; update UI as each part is produced.
+            val renderResult = withContext(Dispatchers.Default) {
                 runCatching {
-                    val loaded = ExcelLoader.load(contentResolver, uri)
-                    workbook?.closeQuietly()
-                    workbook = loaded.workbook
-                    val safeSheetIndex = sheetIndex.coerceIn(0, loaded.workbook.numberOfSheets - 1)
-                    sheetIndex = safeSheetIndex
-                    sheetName = loaded.workbook.getSheetAt(safeSheetIndex).sheetName
-
-                    val outDir = File(cacheDir, "annotate").apply { mkdirs() }
-                    // Clear old cache.
-                    outDir.listFiles()?.forEach { runCatching { it.delete() } }
-
-                    val localParts = mutableListOf<Part>()
-
                     ExcelBitmapRenderer.renderSheetParts(
                         workbook = loaded.workbook,
                         sheetIndex = safeSheetIndex,
@@ -207,38 +265,17 @@ class AnnotateActivity : AppCompatActivity() {
                                 error("Bitmap compress failed")
                             }
                         }
-                        localParts += Part(index = partIndex, file = file)
-                    }
 
-                    localParts.sortBy { it.index }
-                    localParts
+                        runOnUiThread {
+                            onPreviewPartReady(partIndex, partCount, file)
+                        }
+                    }
                 }
             }
 
-            binding.progress.isVisible = false
-
-            result.onSuccess { localParts ->
-                parts.clear()
-                parts.addAll(localParts)
-
-                if (parts.isEmpty()) {
-                    binding.txtStatus.text = "无可标注内容"
-                    updateButtons()
-                    return@launch
-                }
-
-                val labels = parts.map { p -> "第${p.index + 1}段" }
-                binding.spinnerParts.adapter = ArrayAdapter(
-                    this@AnnotateActivity,
-                    android.R.layout.simple_spinner_dropdown_item,
-                    labels,
-                )
-                binding.spinnerParts.isEnabled = parts.size > 1
-                currentPartIndex = 0
-                showPart(0)
-                applyModeUi()
-                updateButtons()
-            }.onFailure { e ->
+            renderResult.onFailure { e ->
+                isGeneratingParts = false
+                binding.progress.isVisible = false
                 binding.txtStatus.text = "生成失败：${e.message ?: e.javaClass.simpleName}"
                 AlertDialog.Builder(this@AnnotateActivity)
                     .setTitle("生成失败")
@@ -246,7 +283,40 @@ class AnnotateActivity : AppCompatActivity() {
                     .setPositiveButton("关闭") { _, _ -> finish() }
                     .show()
                 updateButtons()
+                return@launch
             }
+
+            // Done.
+            isGeneratingParts = false
+            binding.progress.isVisible = false
+            applyModeUi()
+            updateButtons()
+        }
+    }
+
+    private fun onPreviewPartReady(partIndex: Int, partCount: Int, file: File) {
+        if (isDestroyed) return
+
+        if (expectedPartCount <= 0) {
+            expectedPartCount = partCount
+            binding.progress.isIndeterminate = false
+            binding.progress.max = partCount
+        }
+
+        // Parts are produced in order; keep list aligned with spinner positions.
+        parts += Part(index = partIndex, file = file)
+        partsAdapter.add("第${partIndex + 1}段")
+        generatedPartCount = parts.size
+
+        binding.progress.progress = generatedPartCount
+
+        // Show first part immediately so user can start marking.
+        if (partIndex == 0) {
+            currentPartIndex = 0
+            showPart(0)
+        } else {
+            applyModeUi()
+            updateButtons()
         }
     }
 
@@ -261,7 +331,9 @@ class AnnotateActivity : AppCompatActivity() {
     private fun exportAnnotatedImages() {
         if (parts.isEmpty()) return
 
+        isExporting = true
         binding.progress.isVisible = true
+        binding.progress.isIndeterminate = true
         binding.txtStatus.text = "正在导出标注图片…"
         updateButtons()
 
@@ -295,6 +367,7 @@ class AnnotateActivity : AppCompatActivity() {
                 }
             }
 
+            isExporting = false
             binding.progress.isVisible = false
 
             result.onSuccess { uris ->
@@ -314,7 +387,9 @@ class AnnotateActivity : AppCompatActivity() {
     private fun exportAnnotatedPdf() {
         if (parts.isEmpty()) return
 
+        isExporting = true
         binding.progress.isVisible = true
+        binding.progress.isIndeterminate = true
         binding.txtStatus.text = "正在导出标注PDF…"
         updateButtons()
 
@@ -364,6 +439,7 @@ class AnnotateActivity : AppCompatActivity() {
                 }
             }
 
+            isExporting = false
             binding.progress.isVisible = false
 
             result.onSuccess {
