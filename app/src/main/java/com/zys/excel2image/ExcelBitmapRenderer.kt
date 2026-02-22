@@ -42,7 +42,10 @@ data class RenderOptions(
     val autoFitMaxCells: Int = 120_000,
     val columnWidthSampleMaxTextLength: Int = 30,
     val minColumnWidthPx: Int = 12,
-    val emptyColumnWidthPx: Int = 24,
+    // "Empty" means: no visible text in this column within the used range.
+    // We still keep a small width (instead of 0) so grid lines remain readable.
+    val minEmptyColumnWidthPx: Int = 8,
+    val emptyColumnWidthPx: Int = 16,
     val maxColumnWidthPx: Int = 800,
     val autoWrapMinTextLength: Int = 12,
     val autoWrapExcludeNumeric: Boolean = true,
@@ -211,6 +214,7 @@ object ExcelBitmapRenderer {
                 maxCells = options.columnWidthMaxCells,
                 sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
                 minColumnWidthPx = options.minColumnWidthPx,
+                minEmptyColumnWidthPx = options.minEmptyColumnWidthPx,
                 emptyColumnWidthPx = options.emptyColumnWidthPx,
                 maxColumnWidthPx = options.maxColumnWidthPx,
                 minFontPt = options.minFontPt,
@@ -437,6 +441,7 @@ object ExcelBitmapRenderer {
                 maxCells = options.columnWidthMaxCells,
                 sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
                 minColumnWidthPx = options.minColumnWidthPx,
+                minEmptyColumnWidthPx = options.minEmptyColumnWidthPx,
                 emptyColumnWidthPx = options.emptyColumnWidthPx,
                 maxColumnWidthPx = options.maxColumnWidthPx,
                 minFontPt = options.minFontPt,
@@ -673,6 +678,7 @@ object ExcelBitmapRenderer {
                 maxCells = options.columnWidthMaxCells,
                 sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
                 minColumnWidthPx = options.minColumnWidthPx,
+                minEmptyColumnWidthPx = options.minEmptyColumnWidthPx,
                 emptyColumnWidthPx = options.emptyColumnWidthPx,
                 maxColumnWidthPx = options.maxColumnWidthPx,
                 minFontPt = options.minFontPt,
@@ -1036,6 +1042,7 @@ object ExcelBitmapRenderer {
         maxCells: Int,
         sampleMaxTextLength: Int,
         minColumnWidthPx: Int,
+        minEmptyColumnWidthPx: Int,
         emptyColumnWidthPx: Int,
         maxColumnWidthPx: Int,
         minFontPt: Int,
@@ -1162,7 +1169,7 @@ object ExcelBitmapRenderer {
             }
 
             val newWidth = if (!hasAnyText[i]) {
-                min(base, emptyColumnWidthPx).coerceAtLeast(minColumnWidthPx)
+                min(base, emptyColumnWidthPx).coerceAtLeast(minEmptyColumnWidthPx)
             } else {
                 val count = sampleCounts[i]
                 val typical = if (count <= 0) {
@@ -1176,7 +1183,9 @@ object ExcelBitmapRenderer {
                 }
 
                 val withMerged = max(typical, minFromMergedSpans[i])
-                min(base, withMerged).coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                // Allow widening beyond the original Excel column width when it helps reduce extreme wrapping
+                // (otherwise a single narrow column can force 6-8 line wraps and waste a lot of vertical space).
+                withMerged.coerceIn(minColumnWidthPx, maxColumnWidthPx)
             }
 
             if (newWidth != base) {

@@ -5,6 +5,7 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/local_repro_export_pdf.sh "/path/to/file.xlsx"
+#   scripts/local_repro_export_pdf.sh "/path/to/file.xlsx" 2   # sheetIndex=2
 #
 # Output:
 #   .ys_files/temp/repro-out.pdf
@@ -13,6 +14,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 XLSX_PATH="${1:-.ys_files/outputs/0221-初步/excel文件/未结算送审1006个单项明细.xlsx}"
+SHEET_INDEX="${2:-${SHEET_INDEX:-0}}"
 
 if [ ! -f "$XLSX_PATH" ]; then
   echo "ERROR: xlsx not found: $XLSX_PATH" >&2
@@ -64,6 +66,18 @@ has_device() {
   "$ADB" devices | awk 'NR>1 && $2=="device" {found=1} END{exit found?0:1}'
 }
 
+pick_device_serial() {
+  # Prefer an emulator (stable for CI-like repro), otherwise pick the first authorized device.
+  local serial
+  serial="$("$ADB" devices | awk 'NR>1 && $2=="device" && $1 ~ /^emulator-/ {print $1; exit}')"
+  if [ -n "${serial:-}" ]; then
+    echo "$serial"
+    return 0
+  fi
+  serial="$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1; exit}')"
+  echo "$serial"
+}
+
 if ! has_device; then
   echo "No device found. Starting emulator: ${AVD_NAME}"
   # Start emulator in background; if you prefer a GUI window, remove -no-window.
@@ -75,7 +89,12 @@ if ! has_device; then
 
   echo "Waiting for boot complete..."
   for _ in $(seq 1 180); do
-    BOOT="$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+    SERIAL="$(pick_device_serial)"
+    if [ -z "${SERIAL:-}" ]; then
+      sleep 2
+      continue
+    fi
+    BOOT="$("$ADB" -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
     if [ "$BOOT" = "1" ]; then
       break
     fi
@@ -89,24 +108,33 @@ if ! has_device; then
   sleep "${POST_BOOT_WAIT_SECONDS}"
 fi
 
+SERIAL="${ADB_SERIAL:-$(pick_device_serial)}"
+if [ -z "${SERIAL:-}" ]; then
+  echo "ERROR: No authorized adb device found. (If a phone is 'unauthorized', accept the RSA prompt.)" >&2
+  exit 1
+fi
+
+ADB_S=( "$ADB" -s "$SERIAL" )
+
 echo "Installing debug APKs..."
 ./gradlew :app:installDebug :app:installDebugAndroidTest
 
 echo "Preparing device files dir..."
-"$ADB" shell mkdir -p "$(dirname "$DEVICE_XLSX")"
-"$ADB" shell rm -f "$DEVICE_XLSX" "$DEVICE_PDF" || true
+"${ADB_S[@]}" shell mkdir -p "$(dirname "$DEVICE_XLSX")"
+"${ADB_S[@]}" shell rm -f "$DEVICE_XLSX" "$DEVICE_PDF" || true
 
 echo "Pushing xlsx to device..."
-"$ADB" push "$XLSX_PATH" "$DEVICE_XLSX" >/dev/null
+"${ADB_S[@]}" push "$XLSX_PATH" "$DEVICE_XLSX" >/dev/null
 
 echo "Running instrumentation test (export PDF)..."
 TEST_PKG="${PACKAGE_NAME}.test"
-"$ADB" shell am instrument -w -r \
+"${ADB_S[@]}" shell am instrument -w -r \
+  -e sheetIndex "${SHEET_INDEX}" \
   -e class com.zys.excel2image.LocalReproExportPdfTest \
   "${TEST_PKG}/androidx.test.runner.AndroidJUnitRunner"
 
 echo "Pulling exported PDF..."
 rm -f "$OUT_PDF"
-"$ADB" pull "$DEVICE_PDF" "$OUT_PDF" >/dev/null
+"${ADB_S[@]}" pull "$DEVICE_PDF" "$OUT_PDF" >/dev/null
 
 echo "OK: $OUT_PDF"

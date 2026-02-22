@@ -36,6 +36,32 @@ class LocalReproExportPdfTest {
 
         val loaded = ExcelLoader.load(ctx.contentResolver, Uri.fromFile(xlsx))
         try {
+            val args = InstrumentationRegistry.getArguments()
+            val sheetIndexArg = args.getString("sheetIndex")?.trim().orEmpty()
+            val sheetNameArg = args.getString("sheetName")?.trim().orEmpty()
+
+            val sheetIndex =
+                when {
+                    sheetNameArg.isNotEmpty() -> {
+                        var idx = -1
+                        for (i in 0 until loaded.workbook.numberOfSheets) {
+                            if (loaded.workbook.getSheetAt(i).sheetName == sheetNameArg) {
+                                idx = i
+                                break
+                            }
+                        }
+                        if (idx >= 0) idx else 0
+                    }
+
+                    sheetIndexArg.isNotEmpty() -> sheetIndexArg.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                    else -> 0
+                }
+
+            Log.i(
+                "LocalRepro",
+                "Using sheetIndex=$sheetIndex sheetName='${runCatching { loaded.workbook.getSheetAt(sheetIndex).sheetName }.getOrNull()}'",
+            )
+
             val options = RenderOptions(
                 scale = 1.4f,
                 maxBitmapDimension = 16_000,
@@ -53,7 +79,7 @@ class LocalReproExportPdfTest {
             FileOutputStream(outPdf).use { os ->
                 val res = ExcelBitmapRenderer.writeSheetPdf(
                     workbook = loaded.workbook,
-                    sheetIndex = 0,
+                    sheetIndex = sheetIndex,
                     options = options,
                     out = os,
                 )
