@@ -13,11 +13,11 @@
 ## GitHub Releases 分发（给少数人安装）
 
 - 用户只需要在 GitHub 仓库点 `Watch -> Releases`，就能只接收发版通知
-- 每次发版上传一个 `universal` APK（点开即可安装）
+- 每次发版会生成一个带版本号的 APK（例如：`excel2image-v0.1.10.apk`，点开即可安装）
 
 ## 发版（自动构建 APK）
 
-本仓库已配置 GitHub Actions：当你 **发布 Release** 时自动构建 `app-release.apk` 并上传到 Release 的 Assets。
+本仓库已配置 GitHub Actions：当你 **发布 Release** 时自动构建 APK 并上传到 Release 的 Assets（文件名含版本号）。
 
 推荐流程：
 
@@ -25,14 +25,14 @@
 2) 打 tag 并推送：
 
 ```bash
-git tag -a v0.1.9 -m "v0.1.9"
-git push origin v0.1.9
+git tag -a v0.1.10 -m "v0.1.10"
+git push origin v0.1.10
 ```
 
 3) GitHub -> Releases -> Draft a new release
-   - 选择 tag：`v0.1.9`
+   - 选择 tag：`v0.1.10`
    - Publish release
-4) 等 Actions 跑完，在 Release -> Assets 下载 `app-release.apk` 安装到手机
+4) 等 Actions 跑完，在 Release -> Assets 下载 `excel2image-v0.1.10.apk` 安装到手机
 
 ## 打包 APK
 
@@ -94,6 +94,8 @@ keyPassword=你的密码
 - `ANDROID_KEY_PASSWORD`
 
 如果不配置这些 secrets，Actions 会生成“临时 debug keystore”来签名：能安装，但每次签名可能不同，手机上更新时可能需要先卸载旧版。
+
+提示：如果你曾经安装过“临时 debug keystore”签名的 Release 包，后续切换到你自己的 keystore 之后，**第一次升级通常需要卸载旧版再安装**（因为签名已经变了）。
 
 ### 4) 如何验证签名是否生效（每次更新都建议做）
 

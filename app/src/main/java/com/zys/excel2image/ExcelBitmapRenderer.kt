@@ -1231,11 +1231,8 @@ object ExcelBitmapRenderer {
                     continue
                 }
 
-                // Only handle single-row merged cells for now (common in headers).
-                if (merge != null && merge.firstRow != merge.lastRow) {
-                    continue
-                }
-
+                val spanFirstRow = merge?.firstRow ?: r
+                val spanLastRow = merge?.lastRow ?: r
                 val spanFirstCol = merge?.firstCol ?: c
                 val spanLastCol = merge?.lastCol ?: c
 
@@ -1276,10 +1273,55 @@ object ExcelBitmapRenderer {
                 val lineCount = countLinesForLayout(rawText, paint, availableWidth, true)
                 val required = ceil(padding * 2 + lineCount * paint.fontSpacing).toInt()
 
-                val capped = min(required, maxAutoRowHeightPx)
-                if (capped > out[rowIdx]) {
-                    out[rowIdx] = capped
-                    changed = true
+                if (spanFirstRow == spanLastRow) {
+                    val capped = min(required, maxAutoRowHeightPx)
+                    if (capped > out[rowIdx]) {
+                        out[rowIdx] = capped
+                        changed = true
+                    }
+                } else {
+                    // Multi-row merged cells: ensure the *total* merged height can fit the wrapped text.
+                    val spanStartIdx = spanFirstRow - firstRow
+                    val spanEndIdx = spanLastRow - firstRow
+                    if (spanStartIdx !in out.indices || spanEndIdx !in out.indices) continue
+
+                    var currentTotal = 0
+                    val rows = ArrayList<Int>(spanEndIdx - spanStartIdx + 1)
+                    for (i in spanStartIdx..spanEndIdx) {
+                        val h = out[i]
+                        // Don't "unhide" zero-height rows.
+                        if (h > 0) {
+                            currentTotal += h
+                            rows += i
+                        }
+                    }
+                    if (rows.isEmpty()) continue
+
+                    val maxTotal = maxAutoRowHeightPx * rows.size
+                    val cappedTotal = min(required, maxTotal)
+                    if (cappedTotal <= currentTotal) continue
+
+                    var extra = cappedTotal - currentTotal
+                    val per = extra / rows.size
+                    var rem = extra % rows.size
+
+                    for (i in rows) {
+                        var add = per
+                        if (rem > 0) {
+                            add += 1
+                            rem -= 1
+                        }
+                        if (add <= 0) continue
+
+                        val old = out[i]
+                        val newH = min(old + add, maxAutoRowHeightPx)
+                        if (newH != old) {
+                            out[i] = newH
+                            changed = true
+                            extra -= (newH - old)
+                        }
+                        if (extra <= 0) break
+                    }
                 }
             }
         }

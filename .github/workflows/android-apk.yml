@@ -73,11 +73,30 @@ jobs:
       - name: Build (Release)
         run: ./gradlew :app:assembleRelease
 
+      - name: Prepare distributable APK name
+        id: apk
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          APK="$(ls app/build/outputs/apk/release/*.apk | head -n 1)"
+
+          if [ -n "${RELEASE_TAG:-}" ]; then
+            NAME="excel2image-${RELEASE_TAG}.apk"
+          else
+            # Manual/branch builds.
+            NAME="excel2image-dev-${GITHUB_SHA::7}.apk"
+          fi
+
+          cp "${APK}" "${NAME}"
+          echo "apk_path=${NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Print APK signing certificate
         shell: bash
         run: |
           set -euo pipefail
-          APK="$(ls app/build/outputs/apk/release/*.apk | head -n 1)"
+          APK="${{ steps.apk.outputs.apk_path }}"
           echo "APK: ${APK}" >> "$GITHUB_STEP_SUMMARY"
 
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
@@ -95,11 +114,11 @@ jobs:
         if: ${{ github.event_name == 'release' }}
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/*.apk
+          files: ${{ steps.apk.outputs.apk_path }}
 
       - name: Upload workflow artifact (manual run)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: ${{ steps.apk.outputs.apk_path }}
