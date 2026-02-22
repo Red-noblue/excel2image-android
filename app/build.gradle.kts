@@ -17,8 +17,8 @@ android {
         minSdk = 26
         targetSdk = 34
 
-        versionCode = 16
-        versionName = "0.1.15"
+        versionCode = 17
+        versionName = "0.1.16"
 
         // Apache POI + dependencies can easily exceed 64K methods.
         multiDexEnabled = true

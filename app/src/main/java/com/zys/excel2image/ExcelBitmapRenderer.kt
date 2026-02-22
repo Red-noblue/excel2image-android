@@ -46,8 +46,8 @@ data class RenderOptions(
     val minColumnWidthPx: Int = 12,
     // "Empty" means: no visible text in this column within the used range.
     // We still keep a small width (instead of 0) so grid lines remain readable.
-    val minEmptyColumnWidthPx: Int = 8,
-    val emptyColumnWidthPx: Int = 10,
+    val minEmptyColumnWidthPx: Int = 7,
+    val emptyColumnWidthPx: Int = 8,
     val maxColumnWidthPx: Int = 1200,
     val autoWrapMinTextLength: Int = 12,
     val autoWrapExcludeNumeric: Boolean = true,
@@ -1381,6 +1381,11 @@ object ExcelBitmapRenderer {
         // between `measureText` and `breakText`.
         val measureFudgePx = 2f
         val padding2Int = ceil(padding * 2).toInt()
+        // Extra safety to avoid "just barely 3 lines" cases caused by integer rounding and
+        // discrete character widths (e.g. 15 chars at exactly half-width can still break into 3 lines).
+        // This intentionally makes 2-line columns a tiny bit wider so most cells really stay 2 lines.
+        val twoLineSafety = 1.10f
+        val threeLineSafety = 1.06f
         // Keep header reasonably compact: prevent a long header label from wrapping into too many lines,
         // which would make the whole table look "very tall" even if data rows are short.
         val headerMaxLines = 2
@@ -1741,13 +1746,13 @@ object ExcelBitmapRenderer {
                     val req2 = IntArray(count) { j ->
                         val sampleW = samples[i][j]
                         val content = max(0, sampleW - padding2Int)
-                        ceil(content.toFloat() / 2f + padding2Int.toFloat()).toInt()
+                        ceil(content.toFloat() / 2f * twoLineSafety + padding2Int.toFloat()).toInt()
                             .coerceIn(minColumnWidthPx, maxColumnWidthPx)
                     }.also { it.sort() }
                     val req3 = IntArray(count) { j ->
                         val sampleW = samples[i][j]
                         val content = max(0, sampleW - padding2Int)
-                        ceil(content.toFloat() / 3f + padding2Int.toFloat()).toInt()
+                        ceil(content.toFloat() / 3f * threeLineSafety + padding2Int.toFloat()).toInt()
                             .coerceIn(minColumnWidthPx, maxColumnWidthPx)
                     }.also { it.sort() }
 
@@ -1766,8 +1771,11 @@ object ExcelBitmapRenderer {
                     val isNumericCol = numericRatio >= 0.80f
                     val isAsciiCol = asciiRatio >= 0.80f && cjkRatio < 0.20f
                     val isShortCol = p90Len < 10
+                    // Long id-like columns (mostly ASCII / numeric) become extremely wide if forced to a single line.
+                    // For these, allow a 2-line layout to save horizontal space while still keeping cells readable.
+                    val isLongTokenCol = (isNumericCol || isAsciiCol) && p90Len >= 20
 
-                    if (isNumericCol || isAsciiCol || isShortCol) {
+                    if (!isLongTokenCol && (isNumericCol || isAsciiCol || isShortCol)) {
                         val withMerged = max(w1Need, baseMin)
                         max(withMerged, floorFromExcel).coerceIn(minColumnWidthPx, maxColumnWidthPx)
                     } else {
