@@ -17,8 +17,8 @@ android {
         minSdk = 26
         targetSdk = 34
 
-        versionCode = 7
-        versionName = "0.1.6"
+        versionCode = 8
+        versionName = "0.1.7"
 
         // Apache POI + dependencies can easily exceed 64K methods.
         multiDexEnabled = true
@@ -102,6 +102,9 @@ dependencies {
 
     // Pinch-to-zoom preview (so wide tables can stay as a single image).
     implementation("com.github.chrisbanes:PhotoView:2.3.0")
+
+    // Large-image tiling viewer (for smooth markup on high-res exports).
+    implementation("com.davemorrissey.labs:subsampling-scale-image-view-androidx:3.10.0")
 
     // Excel parsing (primarily .xlsx).
     implementation("org.apache.poi:poi-ooxml:5.2.5")

@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
         PDF,
     }
 
+    private var workbookUri: Uri? = null
     private var workbook: Workbook? = null
     private var workbookName: String = "workbook"
     private var currentSheetIndex: Int = 0
@@ -115,6 +116,20 @@ class MainActivity : AppCompatActivity() {
             shareLastPdf()
         }
 
+        binding.btnAnnotate.setOnClickListener {
+            val uri = workbookUri
+            if (uri == null) {
+                showMessage("请先打开Excel文件。")
+                return@setOnClickListener
+            }
+            val intent = Intent(this, AnnotateActivity::class.java).apply {
+                putExtra(AnnotateActivity.EXTRA_EXCEL_URI, uri.toString())
+                putExtra(AnnotateActivity.EXTRA_SHEET_INDEX, currentSheetIndex)
+                putExtra(AnnotateActivity.EXTRA_BASE_NAME, workbookName)
+            }
+            startActivity(intent)
+        }
+
         binding.spinnerSheets.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?,
@@ -170,6 +185,7 @@ class MainActivity : AppCompatActivity() {
         renderJob?.cancel()
         workbook?.closeQuietly()
         workbook = null
+        workbookUri = uri
         previewBitmap?.recycle()
         previewBitmap = null
         binding.imgPreview.setImageDrawable(null)
@@ -431,6 +447,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnShare.isEnabled = lastExportUris.isNotEmpty() && !busy
         binding.btnExportPdf.isEnabled = hasWorkbook && !busy
         binding.btnSharePdf.isEnabled = lastExportPdfUri != null && !busy
+        binding.btnAnnotate.isEnabled = hasWorkbook && !busy
     }
 
     private fun needsLegacyWritePermission(): Boolean {

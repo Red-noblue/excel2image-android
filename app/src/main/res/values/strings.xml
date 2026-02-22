@@ -3,6 +3,7 @@
     <string name="open_excel">打开Excel</string>
     <string name="export_image">导出图片</string>
     <string name="share_image">分享</string>
+    <string name="annotate">标注涂鸦</string>
     <string name="export_pdf">导出PDF</string>
     <string name="share_pdf">分享PDF</string>
     <string name="status_idle">请选择一个Excel文件</string>

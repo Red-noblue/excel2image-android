@@ -68,6 +68,10 @@
                 <data android:mimeType="text/csv" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".AnnotateActivity"
+            android:exported="false" />
     </application>
 
 </manifest>
