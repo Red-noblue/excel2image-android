@@ -1358,7 +1358,14 @@ object ExcelBitmapRenderer {
         val nonEmptyAnyCounts = IntArray(colCount)
         val nonEmptyDataCounts = IntArray(colCount)
         val minFromMergedSpans = IntArray(colCount)
-        val minFromHeaders = IntArray(colCount)
+        // Header-driven minimum width (soft): used to prevent headers wrapping into "too many lines".
+        // We keep two variants so empty/sparse columns can be narrower (allow 3-line headers).
+        val minFromHeaders = IntArray(colCount) // headerMaxLines
+        val minFromHeadersTight = IntArray(colCount) // headerMaxLinesTight
+        // Content-type hints (based on a small per-column sample).
+        val sampleNumericCounts = IntArray(colCount)
+        val sampleMostlyAsciiCounts = IntArray(colCount)
+        val sampleHasCjkCounts = IntArray(colCount)
         // Track the longest content we've seen for each column (used to cap extreme wrapping even if
         // it appears outside our limited sample set).
         val maxMeasuredWithPaddingPx = IntArray(colCount)
@@ -1373,7 +1380,35 @@ object ExcelBitmapRenderer {
         // Keep header reasonably compact: prevent a long header label from wrapping into too many lines,
         // which would make the whole table look "very tall" even if data rows are short.
         val headerMaxLines = 2
+        // For empty/sparse columns we can allow a slightly taller header to save horizontal space.
+        val headerMaxLinesTight = 3
         val headerSafety = 1.10f
+
+        fun isCjk(ch: Char): Boolean {
+            val c = ch.code
+            return (c in 0x4E00..0x9FFF) || (c in 0x3400..0x4DBF)
+        }
+
+        fun hasCjk(text: String): Boolean {
+            for (ch in text) {
+                if (isCjk(ch)) return true
+            }
+            return false
+        }
+
+        fun isMostlyAsciiToken(text: String): Boolean {
+            val t = text.trim()
+            if (t.isEmpty()) return false
+            var ascii = 0
+            var nonWs = 0
+            for (ch in t) {
+                if (ch == '\u00A0' || ch.isWhitespace()) continue
+                nonWs += 1
+                if (ch.code in 33..126) ascii += 1
+            }
+            if (nonWs <= 0) return false
+            return ascii.toFloat() / nonWs.toFloat() >= 0.95f
+        }
 
         var processed = 0
         val headerRow = firstRow
@@ -1453,11 +1488,18 @@ object ExcelBitmapRenderer {
                                 (contentWidth.toFloat() / headerMaxLines.toFloat() + padding2Int.toFloat()) *
                                     headerSafety,
                             ).toInt()
+                        val needTotalTight =
+                            ceil(
+                                (contentWidth.toFloat() / headerMaxLinesTight.toFloat() + padding2Int.toFloat()) *
+                                    headerSafety,
+                            ).toInt()
                         val perCol = ceil(needTotal.toFloat() / span.toFloat()).toInt()
+                        val perColTight = ceil(needTotalTight.toFloat() / span.toFloat()).toInt()
                         for (absCol in spanFirstCol..spanLastCol) {
                             val idx = absCol - firstCol
                             if (idx in 0 until colCount) {
                                 minFromHeaders[idx] = max(minFromHeaders[idx], perCol)
+                                minFromHeadersTight[idx] = max(minFromHeadersTight[idx], perColTight)
                             }
                         }
                         continue
@@ -1538,7 +1580,13 @@ object ExcelBitmapRenderer {
                             (contentWidth.toFloat() / headerMaxLines.toFloat() + padding2Int.toFloat()) *
                                 headerSafety,
                         ).toInt()
+                    val needTight =
+                        ceil(
+                            (contentWidth.toFloat() / headerMaxLinesTight.toFloat() + padding2Int.toFloat()) *
+                                headerSafety,
+                        ).toInt()
                     minFromHeaders[colIdx] = max(minFromHeaders[colIdx], need)
+                    minFromHeadersTight[colIdx] = max(minFromHeadersTight[colIdx], needTight)
                     continue
                 }
 
@@ -1583,6 +1631,9 @@ object ExcelBitmapRenderer {
                 if (count < maxSamplesPerCol) {
                     samples[colIdx][count] = measuredWithPadding
                     sampleTextLens[colIdx][count] = text.length
+                    if (looksNumeric(text)) sampleNumericCounts[colIdx] += 1
+                    if (hasCjk(text)) sampleHasCjkCounts[colIdx] += 1
+                    if (isMostlyAsciiToken(text)) sampleMostlyAsciiCounts[colIdx] += 1
                     sampleCounts[colIdx] = count + 1
                 }
             }
@@ -1606,39 +1657,75 @@ object ExcelBitmapRenderer {
             val newWidth = if (anyCount <= 0 || dataCount <= 0) {
                 // Empty in data rows (even if header has text).
                 val shrink = min(base, emptyColumnWidthPx).coerceAtLeast(minEmptyColumnWidthPx)
-                max(shrink, minFromHeaders[i]).coerceAtMost(maxColumnWidthPx)
+                max(shrink, minFromHeadersTight[i]).coerceAtMost(maxColumnWidthPx)
             } else if (isSparse) {
                 // "Mostly empty" columns waste a lot of horizontal space but add little information.
                 // Shrink aggressively so important text columns can stay wider (reducing extreme wrapping).
                 val shrink = min(base, emptyColumnWidthPx).coerceAtLeast(minEmptyColumnWidthPx)
-                max(shrink, minFromHeaders[i]).coerceAtMost(maxColumnWidthPx)
+                max(shrink, minFromHeadersTight[i]).coerceAtMost(maxColumnWidthPx)
             } else {
                 val count = sampleCounts[i]
+                val lensSorted = if (count <= 0) IntArray(0) else {
+                    val lens = sampleTextLens[i].copyOf(count)
+                    lens.sort()
+                    lens
+                }
+                val p90Len = if (count <= 0) 0 else {
+                    val idx = ((count - 1) * 0.9f).toInt().coerceIn(0, count - 1)
+                    lensSorted[idx]
+                }
+                val numericRatio = if (count <= 0) 0f else sampleNumericCounts[i].toFloat() / count.toFloat()
+                val asciiRatio = if (count <= 0) 0f else sampleMostlyAsciiCounts[i].toFloat() / count.toFloat()
+                val cjkRatio = if (count <= 0) 0f else sampleHasCjkCounts[i].toFloat() / count.toFloat()
+
+                // Target layout:
+                // - Numeric/date/seq columns: keep single-line.
+                // - Mostly ASCII (codes/IDs): keep single-line (wrap only for extreme cases via width cap).
+                // - General text columns: prefer 2-line layout to save horizontal space (improves phone readability).
+                val targetLines = when {
+                    numericRatio >= 0.80f -> 1
+                    asciiRatio >= 0.80f && cjkRatio < 0.20f -> 1
+                    p90Len < 10 -> 1
+                    else -> 2
+                }
+
                 val typical = if (count <= 0) {
-                    // Fallback for "all texts are long": keep it moderate, don't force huge columns.
+                    // Fallback: keep it moderate, don't force huge columns.
                     min(base, 220).coerceAtLeast(minColumnWidthPx)
-                } else {
+                } else if (targetLines <= 1) {
                     val arr = samples[i].copyOf(count)
                     arr.sort()
-                    // Prefer fewer wraps: use a higher percentile than 0.8.
                     val idx = ((count - 1) * 0.9f).toInt().coerceIn(0, count - 1)
                     arr[idx].coerceAtLeast(minColumnWidthPx)
+                } else {
+                    val req = IntArray(count) { j ->
+                        // NOTE: padding is per-cell, not per-line.
+                        val sampleW = samples[i][j]
+                        val content = max(0, sampleW - padding2Int)
+                        ceil(content.toFloat() / 2f + padding2Int.toFloat()).toInt()
+                            .coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                    }
+                    req.sort()
+                    val idx = ((count - 1) * 0.9f).toInt().coerceIn(0, count - 1)
+                    req[idx].coerceAtLeast(minColumnWidthPx)
                 }
 
                 // Prevent over-shrinking wide "text columns" (otherwise a single column can wrap into
                 // 6-8 lines and waste a lot of vertical space).
                 val baseCapped = min(base, maxColumnWidthPx).coerceAtLeast(minColumnWidthPx)
-                val typicalLen = if (count <= 0) 0 else {
-                    val lens = sampleTextLens[i].copyOf(count)
-                    lens.sort()
-                    lens[count / 2]
-                }
+                val medianLen = if (count <= 0) 0 else lensSorted[count / 2]
                 val floorRatio = when {
-                    typicalLen >= 18 -> 0.55f
-                    typicalLen >= 12 -> 0.45f
+                    medianLen >= 18 -> 0.55f
+                    medianLen >= 12 -> 0.45f
                     else -> 0.25f
                 }
-                val floorFromExcel = max(minColumnWidthPx, (baseCapped * floorRatio).roundToInt())
+                val floorFromExcel =
+                    if (targetLines <= 1) {
+                        max(minColumnWidthPx, (baseCapped * floorRatio).roundToInt())
+                    } else {
+                        // When targeting a 2-line layout we intentionally shrink; don't keep Excel's original width.
+                        minColumnWidthPx
+                    }
 
                 val withMerged = max(typical, max(minFromMergedSpans[i], minFromHeaders[i]))
                 max(withMerged, floorFromExcel).coerceIn(minColumnWidthPx, maxColumnWidthPx)
@@ -2397,15 +2484,35 @@ object ExcelBitmapRenderer {
         while (start < text.length) {
             var count = paint.breakText(text, start, text.length, true, maxWidth, null)
             if (count <= 0) break
-            // Avoid an ugly "orphan" last character on its own line when possible (common for Chinese).
-            // If we're about to leave exactly 1 char for the last line, move 1 char down so the last
-            // line has at least 2 chars (only when 2 chars can still fit in maxWidth).
-            val remaining = text.length - (start + count)
-            if (remaining == 1 && count >= 2) {
-                val tailStart = start + count - 1
-                val tailWidth = paint.measureText(text, tailStart, text.length)
-                if (tailWidth <= maxWidth) {
-                    count -= 1
+            val eps = 1.01f
+            val remainingStart0 = start + count
+            if (remainingStart0 < text.length) {
+                // If the remaining part fits in ONE line, we can finish this paragraph in 2 lines.
+                // In that case, prefer a more balanced split instead of an almost-full first line
+                // and a tiny second line (e.g. 13+2).
+                val remainingWidth0 = paint.measureText(text, remainingStart0, text.length)
+                if (remainingWidth0 <= maxWidth * eps) {
+                    val total = text.length - start
+                    var desiredFirst = (total + 1) / 2 // prefer first >= second
+                    desiredFirst = desiredFirst.coerceIn(1, count)
+
+                    // Avoid the very last line being a single orphan char when possible.
+                    if (total - desiredFirst == 1 && desiredFirst > 1) {
+                        val cand = desiredFirst - 1
+                        val tailWidth = paint.measureText(text, start + cand, text.length)
+                        if (tailWidth <= maxWidth * eps) {
+                            desiredFirst = cand
+                        }
+                    }
+
+                    // Ensure the tail still fits in one line; otherwise move split back to the right.
+                    while (desiredFirst < count) {
+                        val tailWidth = paint.measureText(text, start + desiredFirst, text.length)
+                        if (tailWidth <= maxWidth * eps) break
+                        desiredFirst += 1
+                    }
+
+                    count = desiredFirst
                 }
             }
             out.add(text.substring(start, start + count))
