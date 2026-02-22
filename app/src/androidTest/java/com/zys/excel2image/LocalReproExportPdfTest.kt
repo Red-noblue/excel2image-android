@@ -16,7 +16,7 @@ import java.io.FileOutputStream
  *
  * Usage:
  * 1) Push an xlsx into target external files dir as "repro.xlsx"
- * 2) Run: ./gradlew :app:connectedDebugAndroidTest
+ * 2) Run the instrumentation test (e.g. via scripts/local_repro_export_pdf.sh)
  * 3) Pull the generated "repro-out.pdf" from the same directory.
  *
  * The xlsx itself is NOT committed (it can contain sensitive data).

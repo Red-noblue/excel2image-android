@@ -13,7 +13,7 @@
 ## GitHub Releases 分发（给少数人安装）
 
 - 用户只需要在 GitHub 仓库点 `Watch -> Releases`，就能只接收发版通知
-- 每次发版会生成一个带版本号的 APK（例如：`excel2image-v0.1.12.apk`，点开即可安装）
+- 每次发版会生成一个带版本号的 APK（例如：`excel2image-v0.1.13.apk`，点开即可安装）
 
 ## 发版（自动构建 APK）
 
@@ -25,14 +25,14 @@
 2) 打 tag 并推送：
 
 ```bash
-git tag -a v0.1.12 -m "v0.1.12"
-git push origin v0.1.12
+git tag -a v0.1.13 -m "v0.1.13"
+git push origin v0.1.13
 ```
 
 3) GitHub -> Releases -> Draft a new release
-   - 选择 tag：`v0.1.12`
+   - 选择 tag：`v0.1.13`
    - Publish release
-4) 等 Actions 跑完，在 Release -> Assets 下载 `excel2image-v0.1.12.apk` 安装到手机
+4) 等 Actions 跑完，在 Release -> Assets 下载 `excel2image-v0.1.13.apk` 安装到手机
 
 ## 打包 APK
 
@@ -116,8 +116,8 @@ keyPassword=你的密码
 scripts/local_repro_export_pdf.sh ".ys_files/outputs/0221-初步/excel文件/未结算送审1006个单项明细.xlsx"
 ```
 
-脚本会把文件推到设备的应用外部目录，跑一次 `connectedDebugAndroidTest`，并把导出的 PDF 拉回到：
+脚本会把文件推到设备的应用外部目录，跑一次导出 PDF 的 instrumentation 测试，并把导出的 PDF 拉回到：
 
 - `.ys_files/temp/repro-out.pdf`
 
-说明：脚本内部会先 `installDebug + installDebugAndroidTest`，再通过 `adb shell am instrument` 触发测试，避免 Gradle 在测试前后自动卸载应用导致测试文件丢失。
+说明：脚本内部会先 `installDebug + installDebugAndroidTest`，再通过 `adb shell am instrument` 触发 `LocalReproExportPdfTest`，避免 Gradle 在测试前后自动卸载应用导致测试文件丢失。

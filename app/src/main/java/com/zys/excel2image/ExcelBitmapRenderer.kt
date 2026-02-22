@@ -223,6 +223,21 @@ object ExcelBitmapRenderer {
             baseColWidthsPxRaw
         }
 
+        // Determine final render scale early so auto-fit row heights can use the exact same
+        // padding/text metrics logic as drawing (important when scale is small and padding has a floor).
+        val fitScale =
+            fitScaleToMaxWidth(
+                baseColWidthsPx = baseColWidthsPx,
+                requestedScale = options.scale,
+                maxWidthPx = options.maxBitmapDimension,
+            )
+        var scale = fitScale.scale
+        var width = fitScale.widthPx
+
+        if (width > options.maxBitmapDimension) {
+            warnings += "表格太宽，已强制缩小"
+        }
+
         val baseRowHeightsPxRaw = IntArray(lastRow - firstRow + 1) { idx ->
             val rowNum = firstRow + idx
             val row = sheet.getRow(rowNum)
@@ -237,6 +252,7 @@ object ExcelBitmapRenderer {
                 sheet = sheet,
                 formatter = formatter,
                 evaluator = evaluator,
+                renderScale = scale,
                 firstRow = firstRow,
                 lastRow = lastRow,
                 firstCol = firstCol,
@@ -258,20 +274,6 @@ object ExcelBitmapRenderer {
             fit.rowHeightsPx
         } else {
             baseRowHeightsPxRaw
-        }
-
-        // Apply initial scale. We'll shrink further if needed to respect bitmap constraints.
-        val fitScale =
-            fitScaleToMaxWidth(
-                baseColWidthsPx = baseColWidthsPx,
-                requestedScale = options.scale,
-                maxWidthPx = options.maxBitmapDimension,
-            )
-        var scale = fitScale.scale
-        var width = fitScale.widthPx
-
-        if (width > options.maxBitmapDimension) {
-            warnings += "表格太宽，已强制缩小"
         }
 
         val parts = planVerticalParts(
@@ -447,6 +449,19 @@ object ExcelBitmapRenderer {
             baseColWidthsPxRaw
         }
 
+        val fitScale =
+            fitScaleToMaxWidth(
+                baseColWidthsPx = baseColWidthsPx,
+                requestedScale = options.scale,
+                maxWidthPx = options.maxBitmapDimension,
+            )
+        var scale = fitScale.scale
+        var width = fitScale.widthPx
+
+        if (width > options.maxBitmapDimension) {
+            warnings += "表格太宽，已强制缩小"
+        }
+
         val baseRowHeightsPxRaw = IntArray(lastRow - firstRow + 1) { idx ->
             val rowNum = firstRow + idx
             val row = sheet.getRow(rowNum)
@@ -461,6 +476,7 @@ object ExcelBitmapRenderer {
                 sheet = sheet,
                 formatter = formatter,
                 evaluator = evaluator,
+                renderScale = scale,
                 firstRow = firstRow,
                 lastRow = lastRow,
                 firstCol = firstCol,
@@ -482,19 +498,6 @@ object ExcelBitmapRenderer {
             fit.rowHeightsPx
         } else {
             baseRowHeightsPxRaw
-        }
-
-        val fitScale =
-            fitScaleToMaxWidth(
-                baseColWidthsPx = baseColWidthsPx,
-                requestedScale = options.scale,
-                maxWidthPx = options.maxBitmapDimension,
-            )
-        var scale = fitScale.scale
-        var width = fitScale.widthPx
-
-        if (width > options.maxBitmapDimension) {
-            warnings += "表格太宽，已强制缩小"
         }
 
         val parts = planVerticalParts(
@@ -682,6 +685,20 @@ object ExcelBitmapRenderer {
             baseColWidthsPxRaw
         }
 
+        // Apply initial scale. We'll shrink further if needed to respect page constraints.
+        val fitScale =
+            fitScaleToMaxWidth(
+                baseColWidthsPx = baseColWidthsPx,
+                requestedScale = options.scale,
+                maxWidthPx = options.maxBitmapDimension,
+            )
+        var scale = fitScale.scale
+        var width = fitScale.widthPx
+
+        if (width > options.maxBitmapDimension) {
+            warnings += "表格太宽，已强制缩小"
+        }
+
         val baseRowHeightsPxRaw = IntArray(lastRow - firstRow + 1) { idx ->
             val rowNum = firstRow + idx
             val row = sheet.getRow(rowNum)
@@ -696,6 +713,7 @@ object ExcelBitmapRenderer {
                 sheet = sheet,
                 formatter = formatter,
                 evaluator = evaluator,
+                renderScale = scale,
                 firstRow = firstRow,
                 lastRow = lastRow,
                 firstCol = firstCol,
@@ -717,20 +735,6 @@ object ExcelBitmapRenderer {
             fit.rowHeightsPx
         } else {
             baseRowHeightsPxRaw
-        }
-
-        // Apply initial scale. We'll shrink further if needed to respect page constraints.
-        val fitScale =
-            fitScaleToMaxWidth(
-                baseColWidthsPx = baseColWidthsPx,
-                requestedScale = options.scale,
-                maxWidthPx = options.maxBitmapDimension,
-            )
-        var scale = fitScale.scale
-        var width = fitScale.widthPx
-
-        if (width > options.maxBitmapDimension) {
-            warnings += "表格太宽，已强制缩小"
         }
 
         val parts = planVerticalParts(
@@ -1195,6 +1199,7 @@ object ExcelBitmapRenderer {
         sheet: Sheet,
         formatter: DataFormatter,
         evaluator: org.apache.poi.ss.usermodel.FormulaEvaluator,
+        renderScale: Float,
         firstRow: Int,
         lastRow: Int,
         firstCol: Int,
@@ -1216,7 +1221,9 @@ object ExcelBitmapRenderer {
         val out = baseRowHeightsPx.clone()
         var changed = false
 
-        val padding = 4f
+        val scale = renderScale.coerceAtLeast(0.1f)
+        // Must match drawSheetPart's padding so height estimates are consistent with rendering.
+        val padding = max(2f, 4f * scale)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
         var processed = 0
@@ -1267,7 +1274,7 @@ object ExcelBitmapRenderer {
                 for (absCol in spanFirstCol..spanLastCol) {
                     val idx = absCol - firstCol
                     if (idx !in baseColWidthsPx.indices) continue
-                    widthPx += baseColWidthsPx[idx]
+                    widthPx += scaledPx(baseColWidthsPx[idx], scale)
                 }
                 if (widthPx <= 0) continue
 
@@ -1275,7 +1282,7 @@ object ExcelBitmapRenderer {
                 val font = workbook.getFontAt(style.fontIndex)
                 val colIdxForFont = spanFirstCol - firstCol
                 val overridePt = columnFontPts?.getOrNull(colIdxForFont)
-                applyFont(paint, font, 1f, minFontPt, maxFontPt, overridePt = overridePt)
+                applyFont(paint, font, scale, minFontPt, maxFontPt, overridePt = overridePt)
 
                 val hasNewline = rawText.contains('\n') || rawText.contains('\r')
                 val wrap =
@@ -1302,7 +1309,10 @@ object ExcelBitmapRenderer {
                 val required = ceil(padding * 2 + lineCount * paint.fontSpacing).toInt()
 
                 if (spanFirstRow == spanLastRow) {
-                    val capped = min(required, maxAutoRowHeightPx)
+                    // Convert back to *base* px (before applying `scale`) because the rest of the
+                    // pipeline stores row heights in base px.
+                    val requiredBase = ceil(required.toDouble() / scale.toDouble()).toInt()
+                    val capped = min(requiredBase, maxAutoRowHeightPx)
                     if (capped > out[rowIdx]) {
                         out[rowIdx] = capped
                         changed = true
@@ -1319,13 +1329,13 @@ object ExcelBitmapRenderer {
                         val h = out[i]
                         // Don't "unhide" zero-height rows.
                         if (h > 0) {
-                            currentTotal += h
+                            currentTotal += scaledPx(h, scale)
                             rows += i
                         }
                     }
                     if (rows.isEmpty()) continue
 
-                    val maxTotal = maxAutoRowHeightPx * rows.size
+                    val maxTotal = scaledPx(maxAutoRowHeightPx, scale) * rows.size
                     val cappedTotal = min(required, maxTotal)
                     if (cappedTotal <= currentTotal) continue
 
@@ -1342,11 +1352,13 @@ object ExcelBitmapRenderer {
                         if (add <= 0) continue
 
                         val old = out[i]
-                        val newH = min(old + add, maxAutoRowHeightPx)
+                        // Convert scaled "add" back to base px and cap per-row.
+                        val addBase = ceil(add.toDouble() / scale.toDouble()).toInt().coerceAtLeast(1)
+                        val newH = min(old + addBase, maxAutoRowHeightPx)
                         if (newH != old) {
                             out[i] = newH
                             changed = true
-                            extra -= (newH - old)
+                            extra -= (scaledPx(newH, scale) - scaledPx(old, scale))
                         }
                         if (extra <= 0) break
                     }
