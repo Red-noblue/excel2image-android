@@ -231,14 +231,15 @@ class MainActivity : AppCompatActivity() {
                             scale = 0.6f,
                             maxBitmapDimension = 4096,
                             maxTotalPixels = 8_000_000L,
+                            uniformFontPerColumn = true,
                             // Keep preview responsive; export will do a deeper pass.
                             trimMaxCells = 20_000,
                             columnWidthMaxCells = 20_000,
+                            columnFontMaxCells = 20_000,
                             autoFitMaxCells = 20_000,
                             maxAutoRowHeightPx = 900,
-                            // Share mode: keep font size uniform to avoid "some rows suddenly tiny".
-                            minFontPt = 11,
-                            maxFontPt = 11,
+                            minFontPt = 8,
+                            maxFontPt = 20,
                         ),
                     )
                 }
@@ -296,14 +297,15 @@ class MainActivity : AppCompatActivity() {
                             scale = 2.0f,
                             maxBitmapDimension = 16_000,
                             maxTotalPixels = 20_000_000L,
+                            uniformFontPerColumn = true,
                             // Export can spend more time to improve readability.
                             trimMaxCells = 250_000,
                             columnWidthMaxCells = 250_000,
+                            columnFontMaxCells = 250_000,
                             autoFitMaxCells = 250_000,
                             maxAutoRowHeightPx = 2000,
-                            // Force a uniform font size across the sheet for readability/sharing.
-                            minFontPt = 11,
-                            maxFontPt = 11,
+                            minFontPt = 8,
+                            maxFontPt = 20,
                         ),
                     )
                 }
@@ -346,13 +348,14 @@ class MainActivity : AppCompatActivity() {
                             maxBitmapDimension = 16_000,
                             // PDF doesn't allocate bitmaps, but we still keep page sizes reasonable.
                             maxTotalPixels = Long.MAX_VALUE,
+                            uniformFontPerColumn = true,
                             trimMaxCells = 250_000,
                             columnWidthMaxCells = 250_000,
+                            columnFontMaxCells = 250_000,
                             autoFitMaxCells = 250_000,
                             maxAutoRowHeightPx = 2000,
-                            // Force a uniform font size across the sheet for readability/sharing.
-                            minFontPt = 11,
-                            maxFontPt = 11,
+                            minFontPt = 8,
+                            maxFontPt = 20,
                         ),
                     )
                 }

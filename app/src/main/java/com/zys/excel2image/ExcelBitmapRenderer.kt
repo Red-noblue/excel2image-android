@@ -33,9 +33,12 @@ data class RenderOptions(
     val autoFitRowHeights: Boolean = true,
     val adaptiveColumnWidths: Boolean = true,
     val autoWrapOverflowText: Boolean = true,
+    // Typography: keep each column's font size consistent to avoid "some cells suddenly tiny/huge".
+    val uniformFontPerColumn: Boolean = false,
     // Safety limits to avoid heavy scanning on huge sheets.
     val trimMaxCells: Int = 120_000,
     val columnWidthMaxCells: Int = 120_000,
+    val columnFontMaxCells: Int = 120_000,
     val autoFitMaxCells: Int = 120_000,
     val columnWidthSampleMaxTextLength: Int = 30,
     val minColumnWidthPx: Int = 12,
@@ -114,6 +117,28 @@ object ExcelBitmapRenderer {
 
         val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
 
+        val columnFontPts = if (options.uniformFontPerColumn) {
+            val fit = computeColumnFontPts(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                mergeInfo = mergeInfo,
+                maxCells = options.columnFontMaxCells,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            warnings += "已按列统一字号"
+            fit.fontPts
+        } else {
+            null
+        }
+
         val maxDigitWidthPx = computeMaxDigitWidthPx(workbook)
         val baseColWidthsPxRaw = IntArray(lastCol - firstCol + 1) { idx ->
             val col = firstCol + idx
@@ -136,6 +161,7 @@ object ExcelBitmapRenderer {
                 lastCol = lastCol,
                 baseColWidthsPx = baseColWidthsPxRaw,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 maxCells = options.columnWidthMaxCells,
                 sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
                 minColumnWidthPx = options.minColumnWidthPx,
@@ -172,6 +198,7 @@ object ExcelBitmapRenderer {
                 baseColWidthsPx = baseColWidthsPx,
                 baseRowHeightsPx = baseRowHeightsPxRaw,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 maxCells = options.autoFitMaxCells,
                 maxAutoRowHeightPx = options.maxAutoRowHeightPx,
                 autoWrapOverflowText = options.autoWrapOverflowText,
@@ -246,6 +273,7 @@ object ExcelBitmapRenderer {
                 partRowEnd = part.rowEnd,
                 partTopOffsetPx = part.topOffsetPx,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 autoWrapOverflowText = options.autoWrapOverflowText,
                 autoWrapMinTextLength = options.autoWrapMinTextLength,
                 autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
@@ -317,6 +345,28 @@ object ExcelBitmapRenderer {
 
         val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
 
+        val columnFontPts = if (options.uniformFontPerColumn) {
+            val fit = computeColumnFontPts(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                mergeInfo = mergeInfo,
+                maxCells = options.columnFontMaxCells,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            warnings += "已按列统一字号"
+            fit.fontPts
+        } else {
+            null
+        }
+
         val maxDigitWidthPx = computeMaxDigitWidthPx(workbook)
         val baseColWidthsPxRaw = IntArray(lastCol - firstCol + 1) { idx ->
             val col = firstCol + idx
@@ -337,6 +387,7 @@ object ExcelBitmapRenderer {
                 lastCol = lastCol,
                 baseColWidthsPx = baseColWidthsPxRaw,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 maxCells = options.columnWidthMaxCells,
                 sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
                 minColumnWidthPx = options.minColumnWidthPx,
@@ -373,6 +424,7 @@ object ExcelBitmapRenderer {
                 baseColWidthsPx = baseColWidthsPx,
                 baseRowHeightsPx = baseRowHeightsPxRaw,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 maxCells = options.autoFitMaxCells,
                 maxAutoRowHeightPx = options.maxAutoRowHeightPx,
                 autoWrapOverflowText = options.autoWrapOverflowText,
@@ -454,6 +506,7 @@ object ExcelBitmapRenderer {
                 partRowEnd = part.rowEnd,
                 partTopOffsetPx = part.topOffsetPx,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 autoWrapOverflowText = options.autoWrapOverflowText,
                 autoWrapMinTextLength = options.autoWrapMinTextLength,
                 autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
@@ -527,6 +580,28 @@ object ExcelBitmapRenderer {
 
         val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
 
+        val columnFontPts = if (options.uniformFontPerColumn) {
+            val fit = computeColumnFontPts(
+                workbook = workbook,
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                mergeInfo = mergeInfo,
+                maxCells = options.columnFontMaxCells,
+                minFontPt = options.minFontPt,
+                maxFontPt = options.maxFontPt,
+            )
+            fit.warning?.let { warnings += it }
+            warnings += "已按列统一字号"
+            fit.fontPts
+        } else {
+            null
+        }
+
         val maxDigitWidthPx = computeMaxDigitWidthPx(workbook)
         val baseColWidthsPxRaw = IntArray(lastCol - firstCol + 1) { idx ->
             val col = firstCol + idx
@@ -547,6 +622,7 @@ object ExcelBitmapRenderer {
                 lastCol = lastCol,
                 baseColWidthsPx = baseColWidthsPxRaw,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 maxCells = options.columnWidthMaxCells,
                 sampleMaxTextLength = options.columnWidthSampleMaxTextLength,
                 minColumnWidthPx = options.minColumnWidthPx,
@@ -583,6 +659,7 @@ object ExcelBitmapRenderer {
                 baseColWidthsPx = baseColWidthsPx,
                 baseRowHeightsPx = baseRowHeightsPxRaw,
                 mergeInfo = mergeInfo,
+                columnFontPts = columnFontPts,
                 maxCells = options.autoFitMaxCells,
                 maxAutoRowHeightPx = options.maxAutoRowHeightPx,
                 autoWrapOverflowText = options.autoWrapOverflowText,
@@ -671,6 +748,7 @@ object ExcelBitmapRenderer {
                     partRowEnd = part.rowEnd,
                     partTopOffsetPx = part.topOffsetPx,
                     mergeInfo = mergeInfo,
+                    columnFontPts = columnFontPts,
                     autoWrapOverflowText = options.autoWrapOverflowText,
                     autoWrapMinTextLength = options.autoWrapMinTextLength,
                     autoWrapExcludeNumeric = options.autoWrapExcludeNumeric,
@@ -787,6 +865,116 @@ object ExcelBitmapRenderer {
         val warning: String? = null,
     )
 
+    private data class ColumnFontOutcome(
+        val fontPts: IntArray,
+        val warning: String? = null,
+    )
+
+    private fun computeColumnFontPts(
+        workbook: Workbook,
+        sheet: Sheet,
+        formatter: DataFormatter,
+        evaluator: org.apache.poi.ss.usermodel.FormulaEvaluator,
+        firstRow: Int,
+        lastRow: Int,
+        firstCol: Int,
+        lastCol: Int,
+        mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+        maxCells: Int,
+        minFontPt: Int,
+        maxFontPt: Int,
+    ): ColumnFontOutcome {
+        val (cellToMerge, mergeStarts) = mergeInfo
+        val colCount = lastCol - firstCol + 1
+        if (colCount <= 0) {
+            return ColumnFontOutcome(fontPts = IntArray(0))
+        }
+
+        val defaultPt = runCatching { workbook.getFontAt(0).fontHeightInPoints.toInt() }
+            .getOrNull()
+            ?.coerceIn(minFontPt, maxFontPt)
+            ?: 11.coerceIn(minFontPt, maxFontPt)
+
+        // Keep per-column samples small to avoid memory blowups on large sheets.
+        val maxSamplesPerCol = 64
+        val samples = Array(colCount) { IntArray(maxSamplesPerCol) }
+        val sampleCounts = IntArray(colCount)
+
+        var processed = 0
+
+        val rowIt = sheet.rowIterator()
+        while (rowIt.hasNext()) {
+            val row = rowIt.next()
+            val r = row.rowNum
+            if (r < firstRow || r > lastRow) continue
+            if (row.zeroHeight) continue
+
+            val cellIt = row.cellIterator()
+            while (cellIt.hasNext()) {
+                val cell = cellIt.next()
+                val c = cell.columnIndex
+                if (c < firstCol || c > lastCol) continue
+                if (sheet.isColumnHidden(c)) continue
+
+                val text =
+                    runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty().trim()
+                if (text.isEmpty()) continue
+
+                val key = cellKey(r, c)
+                val merge = cellToMerge[key]
+                if (merge != null && key !in mergeStarts) {
+                    continue
+                }
+
+                // Only consider the first cell for merged regions to avoid double-counting.
+                val spanFirstCol = merge?.firstCol ?: c
+                if (spanFirstCol != c) continue
+
+                val colIdx = c - firstCol
+                if (colIdx !in 0 until colCount) continue
+
+                processed++
+                if (processed > maxCells) {
+                    val out = IntArray(colCount) { i ->
+                        val count = sampleCounts[i]
+                        if (count <= 0) defaultPt
+                        else {
+                            val arr = samples[i].copyOf(count)
+                            arr.sort()
+                            // Median font size is robust against a few large headers.
+                            arr[count / 2].coerceIn(minFontPt, maxFontPt)
+                        }
+                    }
+                    return ColumnFontOutcome(
+                        fontPts = out,
+                        warning = "表格较大，已限制按列统一字号的扫描范围",
+                    )
+                }
+
+                val font = workbook.getFontAt(cell.cellStyle.fontIndex)
+                val pt = font.fontHeightInPoints.toInt().coerceIn(minFontPt, maxFontPt)
+
+                val count = sampleCounts[colIdx]
+                if (count < maxSamplesPerCol) {
+                    samples[colIdx][count] = pt
+                    sampleCounts[colIdx] = count + 1
+                }
+            }
+        }
+
+        val out = IntArray(colCount) { i ->
+            val count = sampleCounts[i]
+            if (count <= 0) defaultPt
+            else {
+                val arr = samples[i].copyOf(count)
+                arr.sort()
+                arr[count / 2].coerceIn(minFontPt, maxFontPt)
+            }
+        }
+
+        return ColumnFontOutcome(fontPts = out)
+    }
+
     private fun adaptColumnWidthsPx(
         workbook: Workbook,
         sheet: Sheet,
@@ -798,6 +986,7 @@ object ExcelBitmapRenderer {
         lastCol: Int,
         baseColWidthsPx: IntArray,
         mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+        columnFontPts: IntArray?,
         maxCells: Int,
         sampleMaxTextLength: Int,
         minColumnWidthPx: Int,
@@ -864,7 +1053,9 @@ object ExcelBitmapRenderer {
 
                     // Measure using the cell's font (clamped) so the estimate matches rendering.
                     val font = workbook.getFontAt(cell.cellStyle.fontIndex)
-                    applyFont(paint, font, 1f, minFontPt, maxFontPt)
+                    val colIdxForFont = c - firstCol
+                    val overridePt = columnFontPts?.getOrNull(colIdxForFont)
+                    applyFont(paint, font, 1f, minFontPt, maxFontPt, overridePt = overridePt)
 
                     val measured = measureMaxLineWidthPx(text, paint)
                     val measuredWithPadding = ceil(measured + padding * 2).toInt()
@@ -900,7 +1091,8 @@ object ExcelBitmapRenderer {
 
                 // Measure using the cell's font (clamped) so the estimate matches rendering.
                 val font = workbook.getFontAt(cell.cellStyle.fontIndex)
-                applyFont(paint, font, 1f, minFontPt, maxFontPt)
+                val overridePt = columnFontPts?.getOrNull(colIdx)
+                applyFont(paint, font, 1f, minFontPt, maxFontPt, overridePt = overridePt)
 
                 val measured = measureMaxLineWidthPx(text, paint)
                 val measuredWithPadding = ceil(measured + padding * 2).toInt()
@@ -968,6 +1160,7 @@ object ExcelBitmapRenderer {
         baseColWidthsPx: IntArray,
         baseRowHeightsPx: IntArray,
         mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+        columnFontPts: IntArray?,
         maxCells: Int,
         maxAutoRowHeightPx: Int,
         autoWrapOverflowText: Boolean,
@@ -1009,10 +1202,13 @@ object ExcelBitmapRenderer {
                 if (rawText.isBlank()) continue
 
                 val hasNewline = rawText.contains('\n') || rawText.contains('\r')
+                val trimmedLen = rawText.trim().length
                 val isWrapCandidate =
                     style.wrapText ||
                         hasNewline ||
-                        (autoWrapOverflowText && rawText.trim().length >= autoWrapMinTextLength)
+                        (autoWrapOverflowText && trimmedLen >= autoWrapMinTextLength) ||
+                        // When font size is uniform per column, even shorter texts may overflow and need wrapping.
+                        (columnFontPts != null && trimmedLen >= 4)
                 if (!isWrapCandidate) continue
 
                 processed++
@@ -1048,7 +1244,9 @@ object ExcelBitmapRenderer {
 
                 val availableWidth = max(0f, widthPx.toFloat() - padding * 2)
                 val font = workbook.getFontAt(style.fontIndex)
-                applyFont(paint, font, 1f, minFontPt, maxFontPt)
+                val colIdxForFont = spanFirstCol - firstCol
+                val overridePt = columnFontPts?.getOrNull(colIdxForFont)
+                applyFont(paint, font, 1f, minFontPt, maxFontPt, overridePt = overridePt)
 
                 val wrap =
                     style.wrapText ||
@@ -1061,7 +1259,14 @@ object ExcelBitmapRenderer {
                                 minTextLength = autoWrapMinTextLength,
                                 excludeNumeric = autoWrapExcludeNumeric,
                             ))
-                if (!wrap) continue
+                val finalWrap =
+                    if (!wrap && columnFontPts != null && availableWidth > 0f) {
+                        // When text size is uniform per column we avoid per-cell shrinking; force wrap on overflow.
+                        measureMaxLineWidthPx(rawText, paint) > availableWidth * 1.01f
+                    } else {
+                        wrap
+                    }
+                if (!finalWrap) continue
 
                 val lineCount = countLinesForLayout(rawText, paint, availableWidth, true)
                 val required = ceil(padding * 2 + lineCount * paint.fontSpacing).toInt()
@@ -1301,6 +1506,7 @@ object ExcelBitmapRenderer {
         partRowEnd: Int,
         partTopOffsetPx: Int,
         mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+        columnFontPts: IntArray?,
         autoWrapOverflowText: Boolean,
         autoWrapMinTextLength: Int,
         autoWrapExcludeNumeric: Boolean,
@@ -1311,6 +1517,8 @@ object ExcelBitmapRenderer {
 
         val colCount = lastCol - firstCol + 1
         val rowCount = lastRow - firstRow + 1
+
+        val uniformTextSize = columnFontPts != null
 
         val colWidths = IntArray(colCount) { idx ->
             val base = baseColWidthsPx[idx]
@@ -1419,10 +1627,12 @@ object ExcelBitmapRenderer {
                         runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
                     if (text.isNotBlank()) {
                         val font = workbook.getFontAt(style.fontIndex)
-                        applyFont(textPaint, font, scale, minFontPt, maxFontPt)
+                        val colIdxForFont = (merge?.firstCol ?: absCol) - firstCol
+                        val overridePt = columnFontPts?.getOrNull(colIdxForFont)
+                        applyFont(textPaint, font, scale, minFontPt, maxFontPt, overridePt = overridePt)
                         val alignH = style.alignment
                         val alignV = style.verticalAlignment
-                        val wrap =
+                        val wrap0 =
                             style.wrapText ||
                                 text.contains('\n') ||
                                 text.contains('\r') ||
@@ -1434,6 +1644,14 @@ object ExcelBitmapRenderer {
                                         minTextLength = autoWrapMinTextLength,
                                         excludeNumeric = autoWrapExcludeNumeric,
                                     ))
+                        val availableWidth = max(0f, rect.width() - padding * 2)
+                        val wrap =
+                            if (!wrap0 && uniformTextSize && availableWidth > 0f) {
+                                // When text size is uniform per column we avoid per-cell shrinking; force wrap on overflow.
+                                measureMaxLineWidthPx(text, textPaint) > availableWidth * 1.01f
+                            } else {
+                                wrap0
+                            }
                         drawTextInRect(
                             canvas = canvas,
                             paint = textPaint,
@@ -1443,7 +1661,7 @@ object ExcelBitmapRenderer {
                             alignH = alignH,
                             alignV = alignV,
                             wrap = wrap,
-                            uniformTextSize = minFontPt == maxFontPt,
+                            uniformTextSize = uniformTextSize,
                         )
                     }
                 }
@@ -1485,28 +1703,7 @@ object ExcelBitmapRenderer {
         val originalTextSize = paint.textSize
         var lines = layoutLines()
 
-        // Keep text size uniform (per-column) for "share clear" mode:
-        // - Never shrink per-cell to fit.
-        // - Prefer wrapping; if still overflow, ellipsize/clamp visible lines.
-        if (uniformTextSize) {
-            if (!wrap && availableWidth > 0f && lines.isNotEmpty()) {
-                val single = lines.first()
-                lines = listOf(ellipsizeSingleLine(single, paint, availableWidth, alignH))
-            }
-
-            if (wrap && availableHeight > 0f && lines.isNotEmpty()) {
-                val lineHeight = paint.fontSpacing
-                val maxLines = max(1, (availableHeight / max(1f, lineHeight)).toInt())
-                if (lines.size > maxLines) {
-                    val kept = lines.take(maxLines).toMutableList()
-                    val lastIdx = kept.lastIndex
-                    val marked =
-                        if (alignH == HorizontalAlignment.RIGHT) "..." + kept[lastIdx] else kept[lastIdx] + "..."
-                    kept[lastIdx] = ellipsizeSingleLine(marked, paint, availableWidth, alignH)
-                    lines = kept
-                }
-            }
-        } else {
+        if (!uniformTextSize) {
             val minSizeWidth = max(8f, originalTextSize * 0.80f)
             val minSizeHeight = max(8f, originalTextSize * 0.70f)
 
@@ -1568,33 +1765,6 @@ object ExcelBitmapRenderer {
             }
         } finally {
             canvas.restoreToCount(save)
-        }
-    }
-
-    private fun ellipsizeSingleLine(
-        text: String,
-        paint: Paint,
-        maxWidth: Float,
-        alignH: HorizontalAlignment,
-    ): String {
-        if (text.isEmpty()) return text
-        if (maxWidth <= 0f) return ""
-        if (paint.measureText(text) <= maxWidth) return text
-
-        val ellipsis = "..."
-        val ellipsisWidth = paint.measureText(ellipsis)
-        if (ellipsisWidth >= maxWidth) {
-            val count = paint.breakText(text, 0, text.length, true, maxWidth, null)
-            return if (count <= 0) "" else text.substring(0, count)
-        }
-
-        val remaining = maxWidth - ellipsisWidth
-        return if (alignH == HorizontalAlignment.RIGHT) {
-            val count = paint.breakText(text, 0, text.length, false, remaining, null)
-            if (count <= 0) ellipsis else ellipsis + text.substring(text.length - count, text.length)
-        } else {
-            val count = paint.breakText(text, 0, text.length, true, remaining, null)
-            if (count <= 0) ellipsis else text.substring(0, count) + ellipsis
         }
     }
 
@@ -1660,8 +1830,15 @@ object ExcelBitmapRenderer {
         return true
     }
 
-    private fun applyFont(paint: Paint, font: Font, scale: Float, minPt: Int = 8, maxPt: Int = 28) {
-        val pt = font.fontHeightInPoints.toInt().coerceIn(minPt, maxPt)
+    private fun applyFont(
+        paint: Paint,
+        font: Font,
+        scale: Float,
+        minPt: Int = 8,
+        maxPt: Int = 28,
+        overridePt: Int? = null,
+    ) {
+        val pt = (overridePt ?: font.fontHeightInPoints.toInt()).coerceIn(minPt, maxPt)
         val basePx = max(10f, pt * 4f / 3f)
         paint.textSize = basePx * scale
         val style = when {
