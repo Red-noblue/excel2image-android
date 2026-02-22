@@ -1366,6 +1366,10 @@ object ExcelBitmapRenderer {
         val sampleNumericCounts = IntArray(colCount)
         val sampleMostlyAsciiCounts = IntArray(colCount)
         val sampleHasCjkCounts = IntArray(colCount)
+        val seenDataCells = IntArray(colCount)
+        val sampleIsNumeric = Array(colCount) { BooleanArray(maxSamplesPerCol) }
+        val sampleIsMostlyAscii = Array(colCount) { BooleanArray(maxSamplesPerCol) }
+        val sampleHasCjk = Array(colCount) { BooleanArray(maxSamplesPerCol) }
         // Track the longest content we've seen for each column (used to cap extreme wrapping even if
         // it appears outside our limited sample set).
         val maxMeasuredWithPaddingPx = IntArray(colCount)
@@ -1383,6 +1387,13 @@ object ExcelBitmapRenderer {
         // For empty/sparse columns we can allow a slightly taller header to save horizontal space.
         val headerMaxLinesTight = 3
         val headerSafety = 1.10f
+        val headerSafetyTight = 1.02f
+
+        // Deterministic per-sheet PRNG for reservoir sampling (stable output across runs).
+        val rng =
+            kotlin.random.Random(
+                (sheet.sheetName.hashCode() * 31) xor firstRow xor (lastRow shl 16) xor (firstCol shl 8) xor colCount,
+            )
 
         fun isCjk(ch: Char): Boolean {
             val c = ch.code
@@ -1491,7 +1502,7 @@ object ExcelBitmapRenderer {
                         val needTotalTight =
                             ceil(
                                 (contentWidth.toFloat() / headerMaxLinesTight.toFloat() + padding2Int.toFloat()) *
-                                    headerSafety,
+                                    headerSafetyTight,
                             ).toInt()
                         val perCol = ceil(needTotal.toFloat() / span.toFloat()).toInt()
                         val perColTight = ceil(needTotalTight.toFloat() / span.toFloat()).toInt()
@@ -1583,18 +1594,27 @@ object ExcelBitmapRenderer {
                     val needTight =
                         ceil(
                             (contentWidth.toFloat() / headerMaxLinesTight.toFloat() + padding2Int.toFloat()) *
-                                headerSafety,
+                                headerSafetyTight,
                         ).toInt()
                     minFromHeaders[colIdx] = max(minFromHeaders[colIdx], need)
                     minFromHeadersTight[colIdx] = max(minFromHeadersTight[colIdx], needTight)
                     continue
                 }
 
-                // We keep per-column samples small; once filled we still measure *if* we see a longer
-                // text than ever before in this column (to cap extreme wrapping).
+                // Deterministic reservoir sampling:
+                // - Avoid biasing toward the top rows (important for big sheets)
+                // - Still keep per-column samples small to avoid memory blowups
+                val seen = (seenDataCells[colIdx] + 1).also { seenDataCells[colIdx] = it }
                 val count = sampleCounts[colIdx]
-                val shouldMeasure = count < maxSamplesPerCol || text.length > maxTextLenSeen[colIdx]
-                if (!shouldMeasure) continue
+                val slot = when {
+                    count < maxSamplesPerCol -> count
+                    else -> {
+                        val j = rng.nextInt(seen)
+                        if (j < maxSamplesPerCol) j else -1
+                    }
+                }
+                val mustMeasureForMax = text.length > maxTextLenSeen[colIdx]
+                if (slot < 0 && !mustMeasureForMax) continue
 
                 processed++
                 if (processed > maxCells) {
@@ -1628,19 +1648,48 @@ object ExcelBitmapRenderer {
                 maxTextLenSeen[colIdx] = max(maxTextLenSeen[colIdx], text.length)
                 maxMeasuredWithPaddingPx[colIdx] = max(maxMeasuredWithPaddingPx[colIdx], measuredWithPadding)
 
-                if (count < maxSamplesPerCol) {
-                    samples[colIdx][count] = measuredWithPadding
-                    sampleTextLens[colIdx][count] = text.length
-                    if (looksNumeric(text)) sampleNumericCounts[colIdx] += 1
-                    if (hasCjk(text)) sampleHasCjkCounts[colIdx] += 1
-                    if (isMostlyAsciiToken(text)) sampleMostlyAsciiCounts[colIdx] += 1
-                    sampleCounts[colIdx] = count + 1
+                if (slot >= 0) {
+                    // Update sample classification counters if replacing an existing slot.
+                    if (slot < count) {
+                        if (sampleIsNumeric[colIdx][slot]) sampleNumericCounts[colIdx] -= 1
+                        if (sampleHasCjk[colIdx][slot]) sampleHasCjkCounts[colIdx] -= 1
+                        if (sampleIsMostlyAscii[colIdx][slot]) sampleMostlyAsciiCounts[colIdx] -= 1
+                    }
+
+                    val isNum = looksNumeric(text)
+                    val hasC = hasCjk(text)
+                    val isAscii = isMostlyAsciiToken(text)
+
+                    samples[colIdx][slot] = measuredWithPadding
+                    sampleTextLens[colIdx][slot] = text.length
+                    sampleIsNumeric[colIdx][slot] = isNum
+                    sampleHasCjk[colIdx][slot] = hasC
+                    sampleIsMostlyAscii[colIdx][slot] = isAscii
+                    if (isNum) sampleNumericCounts[colIdx] += 1
+                    if (hasC) sampleHasCjkCounts[colIdx] += 1
+                    if (isAscii) sampleMostlyAsciiCounts[colIdx] += 1
+
+                    if (slot == count) {
+                        sampleCounts[colIdx] = count + 1
+                    }
                 }
             }
         }
 
         val out = baseColWidthsPx.clone()
         var changed = false
+
+        val scale = requestedScale.coerceAtLeast(0.1f)
+        val budgetScaled = if (maxScaledWidthPx > 0) maxScaledWidthPx else Int.MAX_VALUE
+        // For global tuning: store 2-line and 3-line candidates for text columns.
+        val cand2 = IntArray(colCount)
+        val cand3 = IntArray(colCount)
+        val canUse3 = BooleanArray(colCount)
+
+        fun pIndex(count: Int, p: Float): Int {
+            if (count <= 1) return 0
+            return ((count - 1) * p).toInt().coerceIn(0, count - 1)
+        }
 
         for (i in 0 until colCount) {
             val base = baseColWidthsPx[i]
@@ -1665,70 +1714,71 @@ object ExcelBitmapRenderer {
                 max(shrink, minFromHeadersTight[i]).coerceAtMost(maxColumnWidthPx)
             } else {
                 val count = sampleCounts[i]
-                val lensSorted = if (count <= 0) IntArray(0) else {
-                    val lens = sampleTextLens[i].copyOf(count)
-                    lens.sort()
-                    lens
-                }
-                val p90Len = if (count <= 0) 0 else {
-                    val idx = ((count - 1) * 0.9f).toInt().coerceIn(0, count - 1)
-                    lensSorted[idx]
-                }
-                val numericRatio = if (count <= 0) 0f else sampleNumericCounts[i].toFloat() / count.toFloat()
-                val asciiRatio = if (count <= 0) 0f else sampleMostlyAsciiCounts[i].toFloat() / count.toFloat()
-                val cjkRatio = if (count <= 0) 0f else sampleHasCjkCounts[i].toFloat() / count.toFloat()
-
-                // Target layout:
-                // - Numeric/date/seq columns: keep single-line.
-                // - Mostly ASCII (codes/IDs): keep single-line (wrap only for extreme cases via width cap).
-                // - General text columns: prefer 2-line layout to save horizontal space (improves phone readability).
-                val targetLines = when {
-                    numericRatio >= 0.80f -> 1
-                    asciiRatio >= 0.80f && cjkRatio < 0.20f -> 1
-                    p90Len < 10 -> 1
-                    else -> 2
-                }
-
-                val typical = if (count <= 0) {
-                    // Fallback: keep it moderate, don't force huge columns.
-                    min(base, 220).coerceAtLeast(minColumnWidthPx)
-                } else if (targetLines <= 1) {
-                    val arr = samples[i].copyOf(count)
-                    arr.sort()
-                    val idx = ((count - 1) * 0.9f).toInt().coerceIn(0, count - 1)
-                    arr[idx].coerceAtLeast(minColumnWidthPx)
+                if (count <= 0) {
+                    // Fallback when we couldn't sample any cell (rare).
+                    val withMerged = max(min(base, 220).coerceAtLeast(minColumnWidthPx), max(minFromMergedSpans[i], minFromHeaders[i]))
+                    withMerged.coerceIn(minColumnWidthPx, maxColumnWidthPx)
                 } else {
-                    val req = IntArray(count) { j ->
-                        // NOTE: padding is per-cell, not per-line.
+                    val lensSorted = run {
+                        val lens = sampleTextLens[i].copyOf(count)
+                        lens.sort()
+                        lens
+                    }
+                    val p90Idx = pIndex(count, 0.9f)
+                    val p90Len = lensSorted[p90Idx]
+                    val medianLen = lensSorted[count / 2]
+
+                    val numericRatio = sampleNumericCounts[i].toFloat() / count.toFloat()
+                    val asciiRatio = sampleMostlyAsciiCounts[i].toFloat() / count.toFloat()
+                    val cjkRatio = sampleHasCjkCounts[i].toFloat() / count.toFloat()
+
+                    val arrW1 = run {
+                        val arr = samples[i].copyOf(count)
+                        arr.sort()
+                        arr
+                    }
+                    val w1Need = arrW1[p90Idx].coerceAtLeast(minColumnWidthPx)
+                    val req2 = IntArray(count) { j ->
                         val sampleW = samples[i][j]
                         val content = max(0, sampleW - padding2Int)
                         ceil(content.toFloat() / 2f + padding2Int.toFloat()).toInt()
                             .coerceIn(minColumnWidthPx, maxColumnWidthPx)
-                    }
-                    req.sort()
-                    val idx = ((count - 1) * 0.9f).toInt().coerceIn(0, count - 1)
-                    req[idx].coerceAtLeast(minColumnWidthPx)
-                }
+                    }.also { it.sort() }
+                    val req3 = IntArray(count) { j ->
+                        val sampleW = samples[i][j]
+                        val content = max(0, sampleW - padding2Int)
+                        ceil(content.toFloat() / 3f + padding2Int.toFloat()).toInt()
+                            .coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                    }.also { it.sort() }
 
-                // Prevent over-shrinking wide "text columns" (otherwise a single column can wrap into
-                // 6-8 lines and waste a lot of vertical space).
-                val baseCapped = min(base, maxColumnWidthPx).coerceAtLeast(minColumnWidthPx)
-                val medianLen = if (count <= 0) 0 else lensSorted[count / 2]
-                val floorRatio = when {
-                    medianLen >= 18 -> 0.55f
-                    medianLen >= 12 -> 0.45f
-                    else -> 0.25f
-                }
-                val floorFromExcel =
-                    if (targetLines <= 1) {
-                        max(minColumnWidthPx, (baseCapped * floorRatio).roundToInt())
+                    val w2Need0 = req2[p90Idx].coerceAtLeast(minColumnWidthPx)
+                    val w3Need0 = req3[p90Idx].coerceAtLeast(minColumnWidthPx)
+
+                    val baseMin = max(minFromMergedSpans[i], minFromHeaders[i]).coerceAtLeast(minColumnWidthPx)
+                    val baseCapped = min(base, maxColumnWidthPx).coerceAtLeast(minColumnWidthPx)
+                    val floorRatio = when {
+                        medianLen >= 18 -> 0.55f
+                        medianLen >= 12 -> 0.45f
+                        else -> 0.25f
+                    }
+                    val floorFromExcel = max(minColumnWidthPx, (baseCapped * floorRatio).roundToInt())
+
+                    val isNumericCol = numericRatio >= 0.80f
+                    val isAsciiCol = asciiRatio >= 0.80f && cjkRatio < 0.20f
+                    val isShortCol = p90Len < 10
+
+                    if (isNumericCol || isAsciiCol || isShortCol) {
+                        val withMerged = max(w1Need, baseMin)
+                        max(withMerged, floorFromExcel).coerceIn(minColumnWidthPx, maxColumnWidthPx)
                     } else {
-                        // When targeting a 2-line layout we intentionally shrink; don't keep Excel's original width.
-                        minColumnWidthPx
+                        val w2 = max(w2Need0, baseMin).coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                        val w3 = max(w3Need0, baseMin).coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                        cand2[i] = w2
+                        cand3[i] = min(w2, w3)
+                        canUse3[i] = p90Len >= 12 && cand3[i] < cand2[i]
+                        w2
                     }
-
-                val withMerged = max(typical, max(minFromMergedSpans[i], minFromHeaders[i]))
-                max(withMerged, floorFromExcel).coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                }
             }
 
             if (newWidth != base) {
@@ -1737,78 +1787,50 @@ object ExcelBitmapRenderer {
             }
         }
 
-        // If we still have horizontal slack under max width, spend it on columns that would otherwise
-        // wrap into too many lines (reducing tall rows and large vertical blank areas).
-        val scale = requestedScale.coerceAtLeast(0.1f)
-        if (maxScaledWidthPx > 0) {
-            var slack = maxScaledWidthPx - scaledSumPx(out, scale)
-            if (slack > 0) {
-                val targetLines = 2
-                val maxLinesCap = 5
-                val desired = IntArray(colCount) { i ->
-                    val w = out[i]
-                    if (w <= 0) return@IntArray w
-                    if (nonEmptyDataCounts[i] <= 0) return@IntArray w
-                    val count = sampleCounts[i]
-                    if (count <= 0) return@IntArray w
+        // Global re-balancing under a width budget:
+        // Prefer a 2-line layout for text columns, but downgrade a few "heavy" text columns to 3 lines
+        // when the table would otherwise exceed max width (so we avoid tiny scale / unreadable exports).
+        if (budgetScaled != Int.MAX_VALUE) {
+            var total = scaledSumPx(out, scale)
 
-                    val req = IntArray(count) { j ->
-                        // NOTE: padding is per-cell, not per-line. So it must NOT be divided by targetLines.
-                        val sampleW = samples[i][j]
-                        val content = max(0, sampleW - padding2Int)
-                        val need = ceil(content.toFloat() / targetLines.toFloat() + padding2Int.toFloat()).toInt()
-                        need.coerceIn(minColumnWidthPx, maxColumnWidthPx)
-                    }
-                    req.sort()
-                    val idx = ((count - 1) * 0.9f).toInt().coerceIn(0, count - 1)
-                    val p90Need = req[idx]
-
-                    // Also prevent extreme cases where a single long cell would wrap into many lines.
-                    val maxMeasured = maxMeasuredWithPaddingPx[i]
-                    val maxNeed =
-                        if (maxMeasured > 0) {
-                            // NOTE: padding is per-cell, not per-line. So it must NOT be divided by maxLinesCap.
-                            val content = max(0, maxMeasured - padding2Int)
-                            ceil(content.toFloat() / maxLinesCap.toFloat() + padding2Int.toFloat()).toInt()
-                                .coerceIn(minColumnWidthPx, maxColumnWidthPx)
-                        } else {
-                            0
-                        }
-
-                    max(w, max(p90Need, maxNeed))
-                }
-
-                val order =
+            if (total > budgetScaled) {
+                val degradeOrder =
                     (0 until colCount)
-                        .filter { desired[it] > out[it] }
-                        .sortedByDescending { desired[it] - out[it] }
+                        .filter { canUse3[it] && cand3[it] > 0 && cand2[it] > 0 && cand3[it] < out[it] }
+                        .sortedByDescending { scaledPx(out[it], scale) - scaledPx(cand3[it], scale) }
 
-                for (i in order) {
+                for (i in degradeOrder) {
+                    if (total <= budgetScaled) break
+                    val old = out[i]
+                    val target = cand3[i]
+                    if (target <= 0 || target >= old) continue
+                    val saving = scaledPx(old, scale) - scaledPx(target, scale)
+                    if (saving <= 0) continue
+                    out[i] = target
+                    total -= saving
+                    changed = true
+                }
+            }
+
+            // If the last downgrade over-saved, use remaining slack to upgrade the cheapest columns
+            // back to 2 lines (minimizes the number of 3-line columns).
+            var slack = budgetScaled - total
+            if (slack > 0) {
+                val upgradeOrder =
+                    (0 until colCount)
+                        .filter { cand2[it] > 0 && cand3[it] > 0 && out[it] == cand3[it] && cand2[it] > cand3[it] }
+                        .sortedBy { scaledPx(cand2[it], scale) - scaledPx(out[it], scale) }
+
+                for (i in upgradeOrder) {
                     if (slack <= 0) break
                     val old = out[i]
-                    val target = desired[i]
-                    val delta = scaledPx(target, scale) - scaledPx(old, scale)
-                    if (delta <= 0) continue
-
-                    if (delta <= slack) {
-                        out[i] = target
-                        slack -= delta
-                        changed = true
-                    } else {
-                        // Find the largest base width we can afford within remaining slack.
-                        var lo = old
-                        var hi = target
-                        while (lo < hi) {
-                            val mid = (lo + hi + 1) / 2
-                            val d = scaledPx(mid, scale) - scaledPx(old, scale)
-                            if (d <= slack) lo = mid else hi = mid - 1
-                        }
-                        if (lo > old) {
-                            out[i] = lo
-                            slack -= (scaledPx(lo, scale) - scaledPx(old, scale))
-                            changed = true
-                        }
-                    }
+                    val target = cand2[i]
+                    val cost = scaledPx(target, scale) - scaledPx(old, scale)
+                    if (cost <= 0) continue
+                    if (cost > slack) continue
+                    out[i] = target
+                    slack -= cost
+                    changed = true
                 }
             }
         }
