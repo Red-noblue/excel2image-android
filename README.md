@@ -107,3 +107,15 @@ keyPassword=你的密码
 
 - Android Studio（推荐）
 - JDK 17+（本机已安装也可以，但 Android Gradle Plugin 可能要求 17）
+
+## 本地复现/回归（导出 PDF 链路）
+
+当你遇到“某些格子已换行，但行高没撑开导致文字被裁切”等问题时，建议把那份 Excel 放在 `.ys_files/`（不会提交到 git），然后用脚本在模拟器/真机上自动跑一次“导出 PDF”的链路：
+
+```bash
+scripts/local_repro_export_pdf.sh ".ys_files/outputs/0221-初步/excel文件/未结算送审1006个单项明细.xlsx"
+```
+
+脚本会把文件推到设备的应用外部目录，跑一次 `connectedDebugAndroidTest`，并把导出的 PDF 拉回到：
+
+- `.ys_files/temp/repro-out.pdf`

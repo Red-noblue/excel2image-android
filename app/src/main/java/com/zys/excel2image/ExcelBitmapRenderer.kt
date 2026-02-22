@@ -1206,15 +1206,11 @@ object ExcelBitmapRenderer {
                 val rawText = runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
                 if (rawText.isBlank()) continue
 
-                val hasNewline = rawText.contains('\n') || rawText.contains('\r')
-                val trimmedLen = rawText.trim().length
-                val isWrapCandidate =
-                    style.wrapText ||
-                        hasNewline ||
-                        (autoWrapOverflowText && trimmedLen >= autoWrapMinTextLength) ||
-                        // When font size is uniform per column, even shorter texts may overflow and need wrapping.
-                        (columnFontPts != null && trimmedLen >= 4)
-                if (!isWrapCandidate) continue
+                val key = cellKey(r, c)
+                val merge = cellToMerge[key]
+                if (merge != null && key !in mergeStarts) {
+                    continue
+                }
 
                 processed++
                 if (processed > maxCells) {
@@ -1223,12 +1219,6 @@ object ExcelBitmapRenderer {
                         didChange = changed,
                         warning = "表格较大，已限制自适应行高的扫描范围",
                     )
-                }
-
-                val key = cellKey(r, c)
-                val merge = cellToMerge[key]
-                if (merge != null && key !in mergeStarts) {
-                    continue
                 }
 
                 val spanFirstRow = merge?.firstRow ?: r
@@ -1250,6 +1240,7 @@ object ExcelBitmapRenderer {
                 val overridePt = columnFontPts?.getOrNull(colIdxForFont)
                 applyFont(paint, font, 1f, minFontPt, maxFontPt, overridePt = overridePt)
 
+                val hasNewline = rawText.contains('\n') || rawText.contains('\r')
                 val wrap =
                     style.wrapText ||
                         hasNewline ||

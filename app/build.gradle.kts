@@ -17,11 +17,13 @@ android {
         minSdk = 26
         targetSdk = 34
 
-        versionCode = 11
-        versionName = "0.1.10"
+        versionCode = 12
+        versionName = "0.1.11"
 
         // Apache POI + dependencies can easily exceed 64K methods.
         multiDexEnabled = true
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -112,4 +114,8 @@ dependencies {
     implementation("javax.xml.stream:stax-api:1.0-2")
     // StAX implementation (Android doesn't ship javax.xml.stream).
     implementation("com.fasterxml:aalto-xml:1.3.3")
+
+    androidTestImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
 }
