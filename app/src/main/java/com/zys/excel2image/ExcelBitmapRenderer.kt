@@ -836,15 +836,6 @@ object ExcelBitmapRenderer {
                 if (c < firstCol || c > lastCol) continue
                 if (sheet.isColumnHidden(c)) continue
 
-                processed++
-                if (processed > maxCells) {
-                    return ColumnWidthOutcome(
-                        colWidthsPx = baseColWidthsPx,
-                        didChange = false,
-                        warning = "表格较大，已跳过自适应列宽",
-                    )
-                }
-
                 val text =
                     runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty().trim()
                 if (text.isEmpty()) continue
@@ -861,14 +852,23 @@ object ExcelBitmapRenderer {
                 if (spanFirstCol < firstCol || spanLastCol > lastCol) continue
                 if (spanFirstCol != c) continue
 
-                // Measure using the cell's font (clamped) so the estimate matches rendering.
-                val font = workbook.getFontAt(cell.cellStyle.fontIndex)
-                applyFont(paint, font, 1f, minFontPt, maxFontPt)
-
-                val measured = measureMaxLineWidthPx(text, paint)
-                val measuredWithPadding = ceil(measured + padding * 2).toInt()
-
                 if (spanFirstCol != spanLastCol) {
+                    processed++
+                    if (processed > maxCells) {
+                        return ColumnWidthOutcome(
+                            colWidthsPx = baseColWidthsPx,
+                            didChange = false,
+                            warning = "表格较大，已跳过自适应列宽",
+                        )
+                    }
+
+                    // Measure using the cell's font (clamped) so the estimate matches rendering.
+                    val font = workbook.getFontAt(cell.cellStyle.fontIndex)
+                    applyFont(paint, font, 1f, minFontPt, maxFontPt)
+
+                    val measured = measureMaxLineWidthPx(text, paint)
+                    val measuredWithPadding = ceil(measured + padding * 2).toInt()
+
                     // Distribute merged-cell width across its spanned columns (best-effort).
                     val span = (spanLastCol - spanFirstCol + 1).coerceAtLeast(1)
                     val perCol = ceil(measuredWithPadding.toFloat() / span.toFloat()).toInt()
@@ -888,6 +888,22 @@ object ExcelBitmapRenderer {
 
                 // Ignore extremely long texts when deciding column width; those will be wrapped.
                 if (text.length > sampleMaxTextLength) continue
+
+                processed++
+                if (processed > maxCells) {
+                    return ColumnWidthOutcome(
+                        colWidthsPx = baseColWidthsPx,
+                        didChange = false,
+                        warning = "表格较大，已跳过自适应列宽",
+                    )
+                }
+
+                // Measure using the cell's font (clamped) so the estimate matches rendering.
+                val font = workbook.getFontAt(cell.cellStyle.fontIndex)
+                applyFont(paint, font, 1f, minFontPt, maxFontPt)
+
+                val measured = measureMaxLineWidthPx(text, paint)
+                val measuredWithPadding = ceil(measured + padding * 2).toInt()
 
                 val count = sampleCounts[colIdx]
                 if (count < maxSamplesPerCol) {
@@ -988,6 +1004,17 @@ object ExcelBitmapRenderer {
                 if (c < firstCol || c > lastCol) continue
                 if (sheet.isColumnHidden(c)) continue
 
+                val style = cell.cellStyle
+                val rawText = runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
+                if (rawText.isBlank()) continue
+
+                val hasNewline = rawText.contains('\n') || rawText.contains('\r')
+                val isWrapCandidate =
+                    style.wrapText ||
+                        hasNewline ||
+                        (autoWrapOverflowText && rawText.trim().length >= autoWrapMinTextLength)
+                if (!isWrapCandidate) continue
+
                 processed++
                 if (processed > maxCells) {
                     return AutoFitOutcome(
@@ -996,10 +1023,6 @@ object ExcelBitmapRenderer {
                         warning = "表格较大，已限制自适应行高的扫描范围",
                     )
                 }
-
-                val style = cell.cellStyle
-                val rawText = runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty()
-                if (rawText.isBlank()) continue
 
                 val key = cellKey(r, c)
                 val merge = cellToMerge[key]
@@ -1029,8 +1052,7 @@ object ExcelBitmapRenderer {
 
                 val wrap =
                     style.wrapText ||
-                        rawText.contains('\n') ||
-                        rawText.contains('\r') ||
+                        hasNewline ||
                         (autoWrapOverflowText &&
                             shouldAutoWrapText(
                                 text = rawText,
@@ -1421,6 +1443,7 @@ object ExcelBitmapRenderer {
                             alignH = alignH,
                             alignV = alignV,
                             wrap = wrap,
+                            uniformTextSize = minFontPt == maxFontPt,
                         )
                     }
                 }
@@ -1437,6 +1460,7 @@ object ExcelBitmapRenderer {
         alignH: HorizontalAlignment,
         alignV: VerticalAlignment,
         wrap: Boolean,
+        uniformTextSize: Boolean,
     ) {
         val availableWidth = max(0f, rect.width() - padding * 2)
         val availableHeight = max(0f, rect.height() - padding * 2)
@@ -1461,37 +1485,60 @@ object ExcelBitmapRenderer {
         val originalTextSize = paint.textSize
         var lines = layoutLines()
 
-        val minSizeWidth = max(8f, originalTextSize * 0.80f)
-        val minSizeHeight = max(8f, originalTextSize * 0.70f)
-
-        // When not wrapping, try to shrink to fit width to avoid truncation (e.g., long numbers).
-        if (!wrap && availableWidth > 0f && lines.isNotEmpty()) {
-            var maxLineWidth = lines.maxOf { paint.measureText(it) }
-            var tries = 0
-            while (maxLineWidth > availableWidth && paint.textSize > minSizeWidth && tries < 8) {
-                paint.textSize *= 0.9f
-                maxLineWidth = lines.maxOf { paint.measureText(it) }
-                tries++
+        // Keep text size uniform (per-column) for "share clear" mode:
+        // - Never shrink per-cell to fit.
+        // - Prefer wrapping; if still overflow, ellipsize/clamp visible lines.
+        if (uniformTextSize) {
+            if (!wrap && availableWidth > 0f && lines.isNotEmpty()) {
+                val single = lines.first()
+                lines = listOf(ellipsizeSingleLine(single, paint, availableWidth, alignH))
             }
-        }
 
-        // If wrapped/multiline text doesn't fit vertically, shrink a bit to avoid overlap.
-        if (availableHeight > 0f) {
-            fun calcTotalHeight(lineCount: Int): Float {
-                if (lineCount <= 1) {
-                    val fm = paint.fontMetrics
-                    return fm.descent - fm.ascent
+            if (wrap && availableHeight > 0f && lines.isNotEmpty()) {
+                val lineHeight = paint.fontSpacing
+                val maxLines = max(1, (availableHeight / max(1f, lineHeight)).toInt())
+                if (lines.size > maxLines) {
+                    val kept = lines.take(maxLines).toMutableList()
+                    val lastIdx = kept.lastIndex
+                    val marked =
+                        if (alignH == HorizontalAlignment.RIGHT) "..." + kept[lastIdx] else kept[lastIdx] + "..."
+                    kept[lastIdx] = ellipsizeSingleLine(marked, paint, availableWidth, alignH)
+                    lines = kept
                 }
-                return lineCount * paint.fontSpacing
+            }
+        } else {
+            val minSizeWidth = max(8f, originalTextSize * 0.80f)
+            val minSizeHeight = max(8f, originalTextSize * 0.70f)
+
+            // When not wrapping, try to shrink to fit width to avoid truncation (e.g., long numbers).
+            if (!wrap && availableWidth > 0f && lines.isNotEmpty()) {
+                var maxLineWidth = lines.maxOf { paint.measureText(it) }
+                var tries = 0
+                while (maxLineWidth > availableWidth && paint.textSize > minSizeWidth && tries < 8) {
+                    paint.textSize *= 0.9f
+                    maxLineWidth = lines.maxOf { paint.measureText(it) }
+                    tries++
+                }
             }
 
-            var totalTextHeight = calcTotalHeight(lines.size)
-            var tries = 0
-            while (totalTextHeight > availableHeight && paint.textSize > minSizeHeight && tries < 8) {
-                paint.textSize *= 0.9f
-                lines = layoutLines()
-                totalTextHeight = calcTotalHeight(lines.size)
-                tries++
+            // If wrapped/multiline text doesn't fit vertically, shrink a bit to avoid overlap.
+            if (availableHeight > 0f) {
+                fun calcTotalHeight(lineCount: Int): Float {
+                    if (lineCount <= 1) {
+                        val fm = paint.fontMetrics
+                        return fm.descent - fm.ascent
+                    }
+                    return lineCount * paint.fontSpacing
+                }
+
+                var totalTextHeight = calcTotalHeight(lines.size)
+                var tries = 0
+                while (totalTextHeight > availableHeight && paint.textSize > minSizeHeight && tries < 8) {
+                    paint.textSize *= 0.9f
+                    lines = layoutLines()
+                    totalTextHeight = calcTotalHeight(lines.size)
+                    tries++
+                }
             }
         }
 
@@ -1521,6 +1568,33 @@ object ExcelBitmapRenderer {
             }
         } finally {
             canvas.restoreToCount(save)
+        }
+    }
+
+    private fun ellipsizeSingleLine(
+        text: String,
+        paint: Paint,
+        maxWidth: Float,
+        alignH: HorizontalAlignment,
+    ): String {
+        if (text.isEmpty()) return text
+        if (maxWidth <= 0f) return ""
+        if (paint.measureText(text) <= maxWidth) return text
+
+        val ellipsis = "..."
+        val ellipsisWidth = paint.measureText(ellipsis)
+        if (ellipsisWidth >= maxWidth) {
+            val count = paint.breakText(text, 0, text.length, true, maxWidth, null)
+            return if (count <= 0) "" else text.substring(0, count)
+        }
+
+        val remaining = maxWidth - ellipsisWidth
+        return if (alignH == HorizontalAlignment.RIGHT) {
+            val count = paint.breakText(text, 0, text.length, false, remaining, null)
+            if (count <= 0) ellipsis else ellipsis + text.substring(text.length - count, text.length)
+        } else {
+            val count = paint.breakText(text, 0, text.length, true, remaining, null)
+            if (count <= 0) ellipsis else text.substring(0, count) + ellipsis
         }
     }
 

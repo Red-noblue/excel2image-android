@@ -236,6 +236,9 @@ class MainActivity : AppCompatActivity() {
                             columnWidthMaxCells = 20_000,
                             autoFitMaxCells = 20_000,
                             maxAutoRowHeightPx = 900,
+                            // Share mode: keep font size uniform to avoid "some rows suddenly tiny".
+                            minFontPt = 11,
+                            maxFontPt = 11,
                         ),
                     )
                 }
@@ -298,7 +301,9 @@ class MainActivity : AppCompatActivity() {
                             columnWidthMaxCells = 250_000,
                             autoFitMaxCells = 250_000,
                             maxAutoRowHeightPx = 2000,
-                            minFontPt = 10,
+                            // Force a uniform font size across the sheet for readability/sharing.
+                            minFontPt = 11,
+                            maxFontPt = 11,
                         ),
                     )
                 }
@@ -345,7 +350,9 @@ class MainActivity : AppCompatActivity() {
                             columnWidthMaxCells = 250_000,
                             autoFitMaxCells = 250_000,
                             maxAutoRowHeightPx = 2000,
-                            minFontPt = 10,
+                            // Force a uniform font size across the sheet for readability/sharing.
+                            minFontPt = 11,
+                            maxFontPt = 11,
                         ),
                     )
                 }
