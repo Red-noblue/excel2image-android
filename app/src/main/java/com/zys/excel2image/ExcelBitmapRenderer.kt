@@ -1366,6 +1366,9 @@ object ExcelBitmapRenderer {
 
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         val padding = 4f
+        // Small safety buffer to avoid borderline wraps due to font metrics / float rounding differences
+        // between `measureText` and `breakText`.
+        val measureFudgePx = 2f
         val padding2Int = ceil(padding * 2).toInt()
         // Keep header reasonably compact: prevent a long header label from wrapping into too many lines,
         // which would make the whole table look "very tall" even if data rows are short.
@@ -1441,7 +1444,7 @@ object ExcelBitmapRenderer {
                             } else {
                                 measured0
                             }
-                        val measuredWithPadding = ceil(measured + padding * 2).toInt()
+                        val measuredWithPadding = ceil(measured + padding * 2 + measureFudgePx).toInt()
                         val contentWidth = max(0, measuredWithPadding - padding2Int)
 
                         // NOTE: padding is per-cell, not per-line. So it must NOT be divided by headerMaxLines.
@@ -1488,7 +1491,7 @@ object ExcelBitmapRenderer {
                         } else {
                             measured0
                         }
-                    val measuredWithPadding = ceil(measured + padding * 2).toInt()
+                    val measuredWithPadding = ceil(measured + padding * 2 + measureFudgePx).toInt()
 
                     // Distribute merged-cell width across its spanned columns (best-effort).
                     val perCol = ceil(measuredWithPadding.toFloat() / span.toFloat()).toInt()
@@ -1526,7 +1529,7 @@ object ExcelBitmapRenderer {
                         } else {
                             measured0
                         }
-                    val measuredWithPadding = ceil(measured + padding * 2).toInt()
+                    val measuredWithPadding = ceil(measured + padding * 2 + measureFudgePx).toInt()
                     val contentWidth = max(0, measuredWithPadding - padding2Int)
 
                     // NOTE: padding is per-cell, not per-line. So it must NOT be divided by headerMaxLines.
@@ -1572,7 +1575,7 @@ object ExcelBitmapRenderer {
                     } else {
                         measured0
                     }
-                val measuredWithPadding = ceil(measured + padding * 2).toInt()
+                val measuredWithPadding = ceil(measured + padding * 2 + measureFudgePx).toInt()
 
                 maxTextLenSeen[colIdx] = max(maxTextLenSeen[colIdx], text.length)
                 maxMeasuredWithPaddingPx[colIdx] = max(maxMeasuredWithPaddingPx[colIdx], measuredWithPadding)
@@ -1602,11 +1605,13 @@ object ExcelBitmapRenderer {
 
             val newWidth = if (anyCount <= 0 || dataCount <= 0) {
                 // Empty in data rows (even if header has text).
-                min(base, emptyColumnWidthPx).coerceAtLeast(minEmptyColumnWidthPx)
+                val shrink = min(base, emptyColumnWidthPx).coerceAtLeast(minEmptyColumnWidthPx)
+                max(shrink, minFromHeaders[i]).coerceAtMost(maxColumnWidthPx)
             } else if (isSparse) {
                 // "Mostly empty" columns waste a lot of horizontal space but add little information.
                 // Shrink aggressively so important text columns can stay wider (reducing extreme wrapping).
-                min(base, emptyColumnWidthPx).coerceAtLeast(minEmptyColumnWidthPx)
+                val shrink = min(base, emptyColumnWidthPx).coerceAtLeast(minEmptyColumnWidthPx)
+                max(shrink, minFromHeaders[i]).coerceAtMost(maxColumnWidthPx)
             } else {
                 val count = sampleCounts[i]
                 val typical = if (count <= 0) {
@@ -2390,8 +2395,19 @@ object ExcelBitmapRenderer {
         val out = ArrayList<String>()
         var start = 0
         while (start < text.length) {
-            val count = paint.breakText(text, start, text.length, true, maxWidth, null)
+            var count = paint.breakText(text, start, text.length, true, maxWidth, null)
             if (count <= 0) break
+            // Avoid an ugly "orphan" last character on its own line when possible (common for Chinese).
+            // If we're about to leave exactly 1 char for the last line, move 1 char down so the last
+            // line has at least 2 chars (only when 2 chars can still fit in maxWidth).
+            val remaining = text.length - (start + count)
+            if (remaining == 1 && count >= 2) {
+                val tailStart = start + count - 1
+                val tailWidth = paint.measureText(text, tailStart, text.length)
+                if (tailWidth <= maxWidth) {
+                    count -= 1
+                }
+            }
             out.add(text.substring(start, start + count))
             start += count
         }
