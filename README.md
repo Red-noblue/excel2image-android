@@ -25,12 +25,12 @@
 2) 打 tag 并推送：
 
 ```bash
-git tag -a v0.1.8 -m "v0.1.8"
-git push origin v0.1.8
+git tag -a v0.1.9 -m "v0.1.9"
+git push origin v0.1.9
 ```
 
 3) GitHub -> Releases -> Draft a new release
-   - 选择 tag：`v0.1.8`
+   - 选择 tag：`v0.1.9`
    - Publish release
 4) 等 Actions 跑完，在 Release -> Assets 下载 `app-release.apk` 安装到手机
 
