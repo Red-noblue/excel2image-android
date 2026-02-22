@@ -76,6 +76,39 @@ class LocalReproExportPdfTest {
                 maxFontPt = 20,
             )
 
+            val dbg = ExcelBitmapRenderer.debugComputeColumnWidths(
+                workbook = loaded.workbook,
+                sheetIndex = sheetIndex,
+                options = options,
+            )
+            Log.i(
+                "LocalRepro",
+                "Debug colWidths: sheet='${dbg.sheetName}', cols=${dbg.colWidthsPx.size}, scale=${dbg.scale}, widthPx=${dbg.scaledWidthPx}",
+            )
+            dbg.colWidthsPx.forEachIndexed { i, w ->
+                val header = dbg.headers.getOrNull(i).orEmpty()
+                Log.i("LocalRepro", "col=${i + 1} header='$header' widthPxBase=$w")
+            }
+
+            val wrapIssues = ExcelBitmapRenderer.debugFindWrapIssues(
+                workbook = loaded.workbook,
+                sheetIndex = sheetIndex,
+                options = options,
+                minLineCount = 4,
+                maxIssues = 50,
+            )
+            if (wrapIssues.isEmpty()) {
+                Log.i("LocalRepro", "Wrap issues: none (>=4 lines).")
+            } else {
+                Log.w("LocalRepro", "Wrap issues (>=4 lines): count=${wrapIssues.size}")
+                wrapIssues.forEach { iss ->
+                    Log.w(
+                        "LocalRepro",
+                        "wrap row=${iss.row} col=${iss.col} header='${iss.header}' lines=${iss.lineCount} text='${iss.textPreview}'",
+                    )
+                }
+            }
+
             FileOutputStream(outPdf).use { os ->
                 val res = ExcelBitmapRenderer.writeSheetPdf(
                     workbook = loaded.workbook,
