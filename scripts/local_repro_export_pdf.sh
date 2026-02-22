@@ -68,6 +68,7 @@ if ! has_device; then
   echo "No device found. Starting emulator: ${AVD_NAME}"
   # Start emulator in background; if you prefer a GUI window, remove -no-window.
   nohup "$EMU" -avd "$AVD_NAME" -no-snapshot-save -no-boot-anim -gpu swiftshader_indirect -no-window >"$EMULATOR_LOG" 2>&1 &
+  STARTED_EMULATOR=1
 
   echo "Waiting for device..."
   "$ADB" wait-for-device
@@ -80,7 +81,16 @@ if ! has_device; then
     fi
     sleep 2
   done
+
+  # First boot often keeps the system busy (dexopt, Play services), which can cause
+  # "failed to complete startup" ANRs when starting instrumentation too early.
+  POST_BOOT_WAIT_SECONDS="${POST_BOOT_WAIT_SECONDS:-60}"
+  echo "Post-boot wait: ${POST_BOOT_WAIT_SECONDS}s (to avoid startup ANR on fresh boot)"
+  sleep "${POST_BOOT_WAIT_SECONDS}"
 fi
+
+echo "Installing debug APKs..."
+./gradlew :app:installDebug :app:installDebugAndroidTest
 
 echo "Preparing device files dir..."
 "$ADB" shell mkdir -p "$(dirname "$DEVICE_XLSX")"
@@ -90,12 +100,13 @@ echo "Pushing xlsx to device..."
 "$ADB" push "$XLSX_PATH" "$DEVICE_XLSX" >/dev/null
 
 echo "Running instrumentation test (export PDF)..."
-./gradlew :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.zys.excel2image.LocalReproExportPdfTest
+TEST_PKG="${PACKAGE_NAME}.test"
+"$ADB" shell am instrument -w -r \
+  -e class com.zys.excel2image.LocalReproExportPdfTest \
+  "${TEST_PKG}/androidx.test.runner.AndroidJUnitRunner"
 
 echo "Pulling exported PDF..."
 rm -f "$OUT_PDF"
 "$ADB" pull "$DEVICE_PDF" "$OUT_PDF" >/dev/null
 
 echo "OK: $OUT_PDF"
-

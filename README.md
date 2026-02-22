@@ -119,3 +119,5 @@ scripts/local_repro_export_pdf.sh ".ys_files/outputs/0221-初步/excel文件/未
 脚本会把文件推到设备的应用外部目录，跑一次 `connectedDebugAndroidTest`，并把导出的 PDF 拉回到：
 
 - `.ys_files/temp/repro-out.pdf`
+
+说明：脚本内部会先 `installDebug + installDebugAndroidTest`，再通过 `adb shell am instrument` 触发测试，避免 Gradle 在测试前后自动卸载应用导致测试文件丢失。
