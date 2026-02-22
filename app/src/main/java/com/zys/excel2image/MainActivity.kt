@@ -44,6 +44,12 @@ class MainActivity : AppCompatActivity() {
     private var renderJob: Job? = null
     private var pendingExport: PendingExport? = null
 
+    private data class PreviewRender(
+        val bitmap: android.graphics.Bitmap,
+        val wasSplit: Boolean,
+        val warnings: List<String>,
+    )
+
     private val openDocumentLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
@@ -240,7 +246,10 @@ class MainActivity : AppCompatActivity() {
             val result = withContext(Dispatchers.Default) {
                 runCatching {
                     // Preview should be lightweight to avoid OOM on large sheets.
-                    ExcelBitmapRenderer.renderSheet(
+                    // IMPORTANT: render only the first part, otherwise tall tables waste time rendering
+                    // many parts that the preview UI won't show.
+                    var first: android.graphics.Bitmap? = null
+                    val partsRes = ExcelBitmapRenderer.renderSheetParts(
                         workbook = wb,
                         sheetIndex = currentSheetIndex,
                         options = RenderOptions(
@@ -257,6 +266,17 @@ class MainActivity : AppCompatActivity() {
                             minFontPt = 8,
                             maxFontPt = 20,
                         ),
+                        recycleAfterCallback = false,
+                        maxPartsToRender = 1,
+                    ) { partIndex, _, bmp ->
+                        if (partIndex == 0) first = bmp
+                    }
+
+                    val bmp = first ?: error("Preview bitmap missing")
+                    PreviewRender(
+                        bitmap = bmp,
+                        wasSplit = partsRes.wasSplit,
+                        warnings = partsRes.warnings,
                     )
                 }
             }
@@ -264,12 +284,10 @@ class MainActivity : AppCompatActivity() {
             binding.progress.isVisible = false
 
             result.onSuccess { renderResult ->
-                val bmp = renderResult.bitmaps.firstOrNull()
+                val bmp = renderResult.bitmap
                 previewBitmap?.recycle()
                 previewBitmap = bmp
                 binding.imgPreview.setImageBitmap(bmp)
-                // Free additional parts if preview got split unexpectedly.
-                renderResult.bitmaps.drop(1).forEach { it.recycle() }
 
                 binding.txtStatus.text = buildString {
                     append("预览：")

@@ -300,6 +300,7 @@ object ExcelBitmapRenderer {
         sheetIndex: Int,
         options: RenderOptions,
         recycleAfterCallback: Boolean = true,
+        maxPartsToRender: Int = Int.MAX_VALUE,
         onPart: (partIndex: Int, partCount: Int, bitmap: Bitmap) -> Unit,
     ): RenderPartsResult {
         val sheet = workbook.getSheetAt(sheetIndex)
@@ -484,7 +485,9 @@ object ExcelBitmapRenderer {
             warnings += "因尺寸限制自动分段"
         }
 
+        val partLimit = max(1, maxPartsToRender)
         for ((i, part) in parts.withIndex()) {
+            if (i >= partLimit) break
             val bmp = Bitmap.createBitmap(width, part.heightPx, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
             canvas.drawColor(Color.WHITE)

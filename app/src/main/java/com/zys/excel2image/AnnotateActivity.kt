@@ -19,6 +19,7 @@ import com.zys.excel2image.databinding.ActivityAnnotateBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.apache.poi.ss.usermodel.Workbook
 import java.io.File
 import java.io.FileOutputStream
 
@@ -47,6 +48,10 @@ class AnnotateActivity : AppCompatActivity() {
     private val parts = mutableListOf<Part>()
     private var currentPartIndex = 0
     private var drawMode = false
+
+    // Keep the workbook in memory while this screen is open to avoid re-loading/parsing
+    // (Apache POI load is expensive on mobile).
+    private var workbook: Workbook? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -130,6 +135,8 @@ class AnnotateActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        workbook?.closeQuietly()
+        workbook = null
         // Best-effort cleanup of cached preview images.
         for (p in parts) {
             runCatching { p.file.delete() }
@@ -170,6 +177,8 @@ class AnnotateActivity : AppCompatActivity() {
             val result = withContext(Dispatchers.Default) {
                 runCatching {
                     val loaded = ExcelLoader.load(contentResolver, uri)
+                    workbook?.closeQuietly()
+                    workbook = loaded.workbook
                     val safeSheetIndex = sheetIndex.coerceIn(0, loaded.workbook.numberOfSheets - 1)
                     sheetIndex = safeSheetIndex
                     sheetName = loaded.workbook.getSheetAt(safeSheetIndex).sheetName
@@ -201,7 +210,6 @@ class AnnotateActivity : AppCompatActivity() {
                         localParts += Part(index = partIndex, file = file)
                     }
 
-                    loaded.workbook.closeQuietly()
                     localParts.sortBy { it.index }
                     localParts
                 }
@@ -324,19 +332,33 @@ class AnnotateActivity : AppCompatActivity() {
                     DocumentSaver.savePdfToDownloads(this@AnnotateActivity, displayName) { out ->
                         // Re-render the sheet directly into PDF (vector-like), then overlay doodles.
                         // This avoids embedding huge full-resolution bitmaps into the PDF.
-                        val loaded = ExcelLoader.load(contentResolver, uri)
-                        try {
+                        val wb = workbook
+                        if (wb != null) {
                             ExcelBitmapRenderer.writeSheetPdf(
-                                workbook = loaded.workbook,
-                                sheetIndex = sheetIndex.coerceIn(0, loaded.workbook.numberOfSheets - 1),
+                                workbook = wb,
+                                sheetIndex = sheetIndex.coerceIn(0, wb.numberOfSheets - 1),
                                 options = annotateRenderOptions(),
                                 out = out,
                             ) { partIndex, _, canvas ->
                                 val strokeList = parts.firstOrNull { it.index == partIndex }?.strokes.orEmpty()
                                 drawStrokesOnCanvas(canvas, strokeList, scale = 1f)
                             }
-                        } finally {
-                            loaded.workbook.closeQuietly()
+                        } else {
+                            // Fallback (should be rare): reload workbook.
+                            val loaded = ExcelLoader.load(contentResolver, uri)
+                            try {
+                                ExcelBitmapRenderer.writeSheetPdf(
+                                    workbook = loaded.workbook,
+                                    sheetIndex = sheetIndex.coerceIn(0, loaded.workbook.numberOfSheets - 1),
+                                    options = annotateRenderOptions(),
+                                    out = out,
+                                ) { partIndex, _, canvas ->
+                                    val strokeList = parts.firstOrNull { it.index == partIndex }?.strokes.orEmpty()
+                                    drawStrokesOnCanvas(canvas, strokeList, scale = 1f)
+                                }
+                            } finally {
+                                loaded.workbook.closeQuietly()
+                            }
                         }
                     }
                 }
