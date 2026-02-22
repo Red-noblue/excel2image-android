@@ -78,6 +78,52 @@ private data class MergeRegion(
 )
 
 object ExcelBitmapRenderer {
+    // Use ceil when scaling pixel sizes to avoid rounding down causing:
+    // - unexpected extra wraps (scaled width slightly smaller)
+    // - clipped multiline text (scaled height slightly smaller)
+    private fun scaledPx(basePx: Int, scale: Float): Int {
+        if (basePx <= 0) return 0
+        return max(1, ceil(basePx.toDouble() * scale.toDouble()).toInt())
+    }
+
+    private fun scaledSumPx(basePx: IntArray, scale: Float): Int {
+        var sum = 0
+        for (v in basePx) sum += scaledPx(v, scale)
+        return sum
+    }
+
+    private data class FitScaleResult(
+        val scale: Float,
+        val widthPx: Int,
+    )
+
+    private fun fitScaleToMaxWidth(
+        baseColWidthsPx: IntArray,
+        requestedScale: Float,
+        maxWidthPx: Int,
+    ): FitScaleResult {
+        var scale = requestedScale.coerceAtLeast(0.1f)
+        var width = scaledSumPx(baseColWidthsPx, scale)
+        if (maxWidthPx <= 0 || width <= maxWidthPx) return FitScaleResult(scale = scale, widthPx = width)
+
+        // Iteratively shrink: ceil rounding can keep us slightly above the max after a single pass.
+        repeat(6) {
+            val shrink = maxWidthPx.toFloat() / width.toFloat()
+            if (shrink >= 1f) return@repeat
+            val nextScale = (scale * shrink).coerceAtLeast(0.01f)
+            if (nextScale >= scale) return@repeat
+
+            val nextWidth = scaledSumPx(baseColWidthsPx, nextScale)
+            if (nextWidth >= width) return@repeat // no progress (likely hit min 1px per column)
+
+            scale = nextScale
+            width = nextWidth
+            if (width <= maxWidthPx) return FitScaleResult(scale = scale, widthPx = width)
+        }
+
+        return FitScaleResult(scale = scale, widthPx = width)
+    }
+
     fun renderSheet(workbook: Workbook, sheetIndex: Int, options: RenderOptions): RenderResult {
         val sheet = workbook.getSheetAt(sheetIndex)
 
@@ -215,17 +261,14 @@ object ExcelBitmapRenderer {
         }
 
         // Apply initial scale. We'll shrink further if needed to respect bitmap constraints.
-        var scale = options.scale.coerceAtLeast(0.1f)
-
-        fun scaledSum(arr: IntArray): Int = arr.sumOf { (it * scale).toInt() }
-
-        var width = scaledSum(baseColWidthsPx)
-
-        if (width > options.maxBitmapDimension) {
-            val shrink = options.maxBitmapDimension.toFloat() / width.toFloat()
-            scale *= shrink
-            width = scaledSum(baseColWidthsPx)
-        }
+        val fitScale =
+            fitScaleToMaxWidth(
+                baseColWidthsPx = baseColWidthsPx,
+                requestedScale = options.scale,
+                maxWidthPx = options.maxBitmapDimension,
+            )
+        var scale = fitScale.scale
+        var width = fitScale.widthPx
 
         if (width > options.maxBitmapDimension) {
             warnings += "表格太宽，已强制缩小"
@@ -441,17 +484,14 @@ object ExcelBitmapRenderer {
             baseRowHeightsPxRaw
         }
 
-        var scale = options.scale.coerceAtLeast(0.1f)
-
-        fun scaledSum(arr: IntArray): Int = arr.sumOf { (it * scale).toInt() }
-
-        var width = scaledSum(baseColWidthsPx)
-
-        if (width > options.maxBitmapDimension) {
-            val shrink = options.maxBitmapDimension.toFloat() / width.toFloat()
-            scale *= shrink
-            width = scaledSum(baseColWidthsPx)
-        }
+        val fitScale =
+            fitScaleToMaxWidth(
+                baseColWidthsPx = baseColWidthsPx,
+                requestedScale = options.scale,
+                maxWidthPx = options.maxBitmapDimension,
+            )
+        var scale = fitScale.scale
+        var width = fitScale.widthPx
 
         if (width > options.maxBitmapDimension) {
             warnings += "表格太宽，已强制缩小"
@@ -680,17 +720,14 @@ object ExcelBitmapRenderer {
         }
 
         // Apply initial scale. We'll shrink further if needed to respect page constraints.
-        var scale = options.scale.coerceAtLeast(0.1f)
-
-        fun scaledSum(arr: IntArray): Int = arr.sumOf { (it * scale).toInt() }
-
-        var width = scaledSum(baseColWidthsPx)
-
-        if (width > options.maxBitmapDimension) {
-            val shrink = options.maxBitmapDimension.toFloat() / width.toFloat()
-            scale *= shrink
-            width = scaledSum(baseColWidthsPx)
-        }
+        val fitScale =
+            fitScaleToMaxWidth(
+                baseColWidthsPx = baseColWidthsPx,
+                requestedScale = options.scale,
+                maxWidthPx = options.maxBitmapDimension,
+            )
+        var scale = fitScale.scale
+        var width = fitScale.widthPx
 
         if (width > options.maxBitmapDimension) {
             warnings += "表格太宽，已强制缩小"
@@ -1465,9 +1502,7 @@ object ExcelBitmapRenderer {
     ): List<PartPlan> {
         if (scaledWidthPx <= 0) return emptyList()
 
-        val scaledRowHeights = baseRowHeightsPx.map { h ->
-            if (h <= 0) 0 else max(1, (h * scale).toInt())
-        }
+        val scaledRowHeights = baseRowHeightsPx.map { h -> scaledPx(h, scale) }
         val totalHeight = scaledRowHeights.sum()
 
         // Single-part fast path.
@@ -1558,14 +1593,8 @@ object ExcelBitmapRenderer {
 
         val uniformTextSize = columnFontPts != null
 
-        val colWidths = IntArray(colCount) { idx ->
-            val base = baseColWidthsPx[idx]
-            if (base <= 0) 0 else max(1, (base * scale).toInt())
-        }
-        val rowHeights = IntArray(rowCount) { idx ->
-            val base = baseRowHeightsPx[idx]
-            if (base <= 0) 0 else max(1, (base * scale).toInt())
-        }
+        val colWidths = IntArray(colCount) { idx -> scaledPx(baseColWidthsPx[idx], scale) }
+        val rowHeights = IntArray(rowCount) { idx -> scaledPx(baseRowHeightsPx[idx], scale) }
 
         val x = IntArray(colCount + 1)
         for (i in 0 until colCount) x[i + 1] = x[i] + colWidths[i]
