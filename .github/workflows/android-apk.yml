@@ -73,6 +73,24 @@ jobs:
       - name: Build (Release)
         run: ./gradlew :app:assembleRelease
 
+      - name: Print APK signing certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(ls app/build/outputs/apk/release/*.apk | head -n 1)"
+          echo "APK: ${APK}" >> "$GITHUB_STEP_SUMMARY"
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "${SDK_ROOT}" ]; then
+            echo "ANDROID_SDK_ROOT/ANDROID_HOME not set" >&2
+            exit 1
+          fi
+
+          APK_SIGNER="$(ls "${SDK_ROOT}"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Signer certs:" >> "$GITHUB_STEP_SUMMARY"
+          "${APK_SIGNER}" verify --print-certs "${APK}" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload to GitHub Release
         if: ${{ github.event_name == 'release' }}
         uses: softprops/action-gh-release@v2

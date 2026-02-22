@@ -533,6 +533,7 @@ object ExcelBitmapRenderer {
         sheetIndex: Int,
         options: RenderOptions,
         out: OutputStream,
+        onPartCanvas: ((partIndex: Int, partCount: Int, canvas: Canvas) -> Unit)? = null,
     ): PdfWriteResult {
         val sheet = workbook.getSheetAt(sheetIndex)
 
@@ -756,6 +757,7 @@ object ExcelBitmapRenderer {
                     maxFontPt = options.maxFontPt,
                 )
 
+                onPartCanvas?.invoke(i, parts.size, canvas)
                 pdf.finishPage(page)
             }
 

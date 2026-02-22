@@ -3,7 +3,6 @@ package com.zys.excel2image
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
@@ -181,23 +180,10 @@ class AnnotateActivity : AppCompatActivity() {
 
                     val localParts = mutableListOf<Part>()
 
-                    // Export-like scale for clear markup. (SSIV will keep it smooth with tiling.)
                     ExcelBitmapRenderer.renderSheetParts(
                         workbook = loaded.workbook,
                         sheetIndex = safeSheetIndex,
-                        options = RenderOptions(
-                            scale = 2.0f,
-                            maxBitmapDimension = 16_000,
-                            maxTotalPixels = 20_000_000L,
-                            uniformFontPerColumn = true,
-                            trimMaxCells = 250_000,
-                            columnWidthMaxCells = 250_000,
-                            columnFontMaxCells = 250_000,
-                            autoFitMaxCells = 250_000,
-                            maxAutoRowHeightPx = 2000,
-                            minFontPt = 8,
-                            maxFontPt = 20,
-                        ),
+                        options = annotateRenderOptions(),
                     ) { partIndex, partCount, bmp ->
                         val name = buildString {
                             append("sheet_")
@@ -327,6 +313,7 @@ class AnnotateActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) {
                 runCatching {
+                    val uri = excelUri ?: error("Missing excel uri")
                     val displayName = buildString {
                         append(baseName)
                         append("_")
@@ -335,27 +322,21 @@ class AnnotateActivity : AppCompatActivity() {
                     }
 
                     DocumentSaver.savePdfToDownloads(this@AnnotateActivity, displayName) { out ->
-                        val doc = android.graphics.pdf.PdfDocument()
+                        // Re-render the sheet directly into PDF (vector-like), then overlay doodles.
+                        // This avoids embedding huge full-resolution bitmaps into the PDF.
+                        val loaded = ExcelLoader.load(contentResolver, uri)
                         try {
-                            var pageNo = 1
-                            for (part in parts) {
-                                val bmp = decodeImmutable(part.file)
-                                try {
-                                    val pageInfo = android.graphics.pdf.PdfDocument.PageInfo
-                                        .Builder(bmp.width, bmp.height, pageNo++)
-                                        .create()
-                                    val page = doc.startPage(pageInfo)
-                                    page.canvas.drawColor(Color.WHITE)
-                                    page.canvas.drawBitmap(bmp, 0f, 0f, null)
-                                    drawStrokesOnCanvas(page.canvas, part.strokes, scale = 1f)
-                                    doc.finishPage(page)
-                                } finally {
-                                    bmp.recycle()
-                                }
+                            ExcelBitmapRenderer.writeSheetPdf(
+                                workbook = loaded.workbook,
+                                sheetIndex = sheetIndex.coerceIn(0, loaded.workbook.numberOfSheets - 1),
+                                options = annotateRenderOptions(),
+                                out = out,
+                            ) { partIndex, _, canvas ->
+                                val strokeList = parts.firstOrNull { it.index == partIndex }?.strokes.orEmpty()
+                                drawStrokesOnCanvas(canvas, strokeList, scale = 1f)
                             }
-                            doc.writeTo(out)
                         } finally {
-                            doc.close()
+                            loaded.workbook.closeQuietly()
                         }
                     }
                 }
@@ -413,12 +394,24 @@ class AnnotateActivity : AppCompatActivity() {
         return if (bmp.isMutable) bmp else bmp.copy(Bitmap.Config.ARGB_8888, true)
     }
 
-    private fun decodeImmutable(file: File): Bitmap {
-        val opts = BitmapFactory.Options().apply {
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        return BitmapFactory.decodeFile(file.absolutePath, opts)
-            ?: error("Decode failed: ${file.name}")
+    private fun annotateRenderOptions(): RenderOptions {
+        // Export-like scale for clear markup. (SSIV will keep it smooth with tiling.)
+        // NOTE: Keep this consistent across:
+        // - cached part images (for drawing)
+        // - annotated PDF export (for exact coordinate match)
+        return RenderOptions(
+            scale = 2.0f,
+            maxBitmapDimension = 16_000,
+            maxTotalPixels = 20_000_000L,
+            uniformFontPerColumn = true,
+            trimMaxCells = 250_000,
+            columnWidthMaxCells = 250_000,
+            columnFontMaxCells = 250_000,
+            autoFitMaxCells = 250_000,
+            maxAutoRowHeightPx = 2000,
+            minFontPt = 8,
+            maxFontPt = 20,
+        )
     }
 
     private fun sanitizeForFileName(name: String): String {
