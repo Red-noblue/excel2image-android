@@ -32,7 +32,8 @@ android {
             val propsFile = rootProject.file("keystore.properties")
             if (propsFile.exists()) {
                 val props = Properties().apply { load(FileInputStream(propsFile)) }
-                storeFile = file(props.getProperty("storeFile"))
+                // Resolve relative paths from the repo root (keystore.properties lives in root).
+                storeFile = rootProject.file(props.getProperty("storeFile"))
                 storePassword = props.getProperty("storePassword")
                 keyAlias = props.getProperty("keyAlias")
                 keyPassword = props.getProperty("keyPassword")
