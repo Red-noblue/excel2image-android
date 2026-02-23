@@ -160,7 +160,13 @@ object ExcelBitmapRenderer {
     fun renderSheet(workbook: Workbook, sheetIndex: Int, options: RenderOptions): RenderResult {
         val sheet = workbook.getSheetAt(sheetIndex)
 
-        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
+        val candidateRange =
+            chooseCandidateRange(
+                workbook = workbook,
+                sheetIndex = sheetIndex,
+                sheet = sheet,
+                maxCells = options.trimMaxCells,
+            )
         if (candidateRange == null) {
             val bmp = Bitmap.createBitmap(800, 400, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
@@ -382,7 +388,13 @@ object ExcelBitmapRenderer {
         val formatter = DataFormatter()
         val evaluator = workbook.creationHelper.createFormulaEvaluator()
 
-        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
+        val candidateRange =
+            chooseCandidateRange(
+                workbook = workbook,
+                sheetIndex = sheetIndex,
+                sheet = sheet,
+                maxCells = options.trimMaxCells,
+            )
             ?: return DebugColumnWidths(
                 sheetName = sheet.sheetName,
                 firstCol = 0,
@@ -407,6 +419,17 @@ object ExcelBitmapRenderer {
 
         val (firstRow, lastRow, firstCol, lastCol) = used
         val mergeInfo = buildMergeInfo(sheet, firstRow, lastRow, firstCol, lastCol)
+        val headerRow =
+            detectHeaderRowIndex(
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                mergeInfo = mergeInfo,
+            )
 
         val columnFontPts = if (options.uniformFontPerColumn) {
             computeColumnFontPts(
@@ -471,7 +494,7 @@ object ExcelBitmapRenderer {
             )
 
         val headers = (firstCol..lastCol).map { c ->
-            val cell = sheet.getRow(firstRow)?.getCell(c)
+            val cell = sheet.getRow(headerRow)?.getCell(c)
             if (cell == null) {
                 ""
             } else {
@@ -502,7 +525,13 @@ object ExcelBitmapRenderer {
         val formatter = DataFormatter()
         val evaluator = workbook.creationHelper.createFormulaEvaluator()
 
-        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet) ?: return emptyList()
+        val candidateRange =
+            chooseCandidateRange(
+                workbook = workbook,
+                sheetIndex = sheetIndex,
+                sheet = sheet,
+                maxCells = options.trimMaxCells,
+            ) ?: return emptyList()
         val used = if (options.trimBlankEdges) {
             trimUsedRange(
                 sheet = sheet,
@@ -545,7 +574,18 @@ object ExcelBitmapRenderer {
         val (cellToMerge, mergeStarts) = mergeInfo
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-        val headerRow = sheet.getRow(firstRow)
+        val headerRowIndex =
+            detectHeaderRowIndex(
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                mergeInfo = mergeInfo,
+            )
+        val headerRow = sheet.getRow(headerRowIndex)
         val headers = (firstCol..lastCol).map { c ->
             val cell = headerRow?.getCell(c)
             if (cell == null) "" else cleanCellText(runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty())
@@ -641,7 +681,13 @@ object ExcelBitmapRenderer {
     ): RenderPartsResult {
         val sheet = workbook.getSheetAt(sheetIndex)
 
-        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
+        val candidateRange =
+            chooseCandidateRange(
+                workbook = workbook,
+                sheetIndex = sheetIndex,
+                sheet = sheet,
+                maxCells = options.trimMaxCells,
+            )
         if (candidateRange == null) {
             val bmp = Bitmap.createBitmap(800, 400, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(bmp)
@@ -877,7 +923,13 @@ object ExcelBitmapRenderer {
     ): PdfWriteResult {
         val sheet = workbook.getSheetAt(sheetIndex)
 
-        val candidateRange = findPrintAreaRange(workbook, sheetIndex) ?: findUsedRange(sheet)
+        val candidateRange =
+            chooseCandidateRange(
+                workbook = workbook,
+                sheetIndex = sheetIndex,
+                sheet = sheet,
+                maxCells = options.trimMaxCells,
+            )
         if (candidateRange == null) {
             val pdf = PdfDocument()
             try {
@@ -1244,7 +1296,17 @@ object ExcelBitmapRenderer {
         val sampleCounts = IntArray(colCount)
 
         var processed = 0
-        val headerRow = firstRow
+        val headerRow =
+            detectHeaderRowIndex(
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                mergeInfo = mergeInfo,
+            )
 
         val rowIt = sheet.rowIterator()
         while (rowIt.hasNext()) {
@@ -1252,8 +1314,8 @@ object ExcelBitmapRenderer {
             val r = row.rowNum
             if (r < firstRow || r > lastRow) continue
             if (row.zeroHeight) continue
-
-            val isHeader = r == headerRow
+            // Skip titles and header rows; we want a robust estimate from data rows only.
+            if (r <= headerRow) continue
 
             val cellIt = row.cellIterator()
             while (cellIt.hasNext()) {
@@ -1265,8 +1327,6 @@ object ExcelBitmapRenderer {
                 val text =
                     cleanCellText(runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty())
                 if (text.isEmpty()) continue
-                // Header text should not affect column width heuristics; we optimize for data rows.
-                if (isHeader) continue
 
                 val key = cellKey(r, c)
                 val merge = cellToMerge[key]
@@ -1321,6 +1381,110 @@ object ExcelBitmapRenderer {
         }
 
         return ColumnFontOutcome(fontPts = out)
+    }
+
+    private fun detectHeaderRowIndex(
+        sheet: Sheet,
+        formatter: DataFormatter,
+        evaluator: org.apache.poi.ss.usermodel.FormulaEvaluator,
+        firstRow: Int,
+        lastRow: Int,
+        firstCol: Int,
+        lastCol: Int,
+        mergeInfo: Pair<Map<Long, MergeRegion>, Set<Long>>,
+    ): Int {
+        val (cellToMerge, mergeStarts) = mergeInfo
+        val colCount = lastCol - firstCol + 1
+        if (colCount <= 0) return firstRow
+
+        // Scan a few top rows and pick the row that "looks most like a header":
+        // - many non-empty cells (usually one per column)
+        // - covers most columns
+        // Exclude banner/title rows: a single merged cell spanning (almost) the whole table.
+        val maxScan = 12
+        val scanEnd = min(lastRow, firstRow + maxScan - 1)
+
+        var bestRow = firstRow
+        var bestScore = -1
+
+        for (r in firstRow..scanEnd) {
+            val row = sheet.getRow(r) ?: continue
+            if (row.zeroHeight) continue
+
+            var nonEmptyStarts = 0
+            var coveredCols = 0
+            val covered = BooleanArray(colCount)
+
+            for (c in firstCol..lastCol) {
+                if (sheet.isColumnHidden(c)) continue
+                val cell = row.getCell(c) ?: continue
+
+                val key = cellKey(r, c)
+                val merge = cellToMerge[key]
+                if (merge != null && key !in mergeStarts) continue
+
+                val text =
+                    cleanCellText(runCatching { formatter.formatCellValue(cell, evaluator) }.getOrNull().orEmpty())
+                if (text.isEmpty()) continue
+
+                nonEmptyStarts += 1
+
+                val spanFirstCol = merge?.firstCol ?: c
+                val spanLastCol = merge?.lastCol ?: c
+                for (absCol in spanFirstCol..spanLastCol) {
+                    val idx = absCol - firstCol
+                    if (idx !in 0 until colCount) continue
+                    if (!covered[idx]) {
+                        covered[idx] = true
+                        coveredCols += 1
+                    }
+                }
+            }
+
+            if (nonEmptyStarts <= 0) continue
+
+            val bannerThreshold = max(2, (colCount * 0.80f).roundToInt())
+            val isBannerRow = nonEmptyStarts == 1 && coveredCols >= bannerThreshold
+            if (isBannerRow) continue
+
+            val score = nonEmptyStarts * 1000 + coveredCols
+            if (score > bestScore) {
+                bestScore = score
+                bestRow = r
+            }
+        }
+
+        return bestRow.coerceIn(firstRow, lastRow)
+    }
+
+    private fun chooseCandidateRange(
+        workbook: Workbook,
+        sheetIndex: Int,
+        sheet: Sheet,
+        maxCells: Int,
+    ): UsedRange? {
+        val used = findUsedRange(sheet) ?: return findPrintAreaRange(workbook, sheetIndex)
+        val print = findPrintAreaRange(workbook, sheetIndex) ?: return used
+
+        fun area(r: UsedRange): Long {
+            val rows = (r.lastRow - r.firstRow + 1).toLong().coerceAtLeast(0)
+            val cols = (r.lastCol - r.firstCol + 1).toLong().coerceAtLeast(0)
+            return rows * cols
+        }
+
+        val usedArea = area(used)
+        val printArea = area(print)
+
+        // Print areas are often stale (only the first page) and would silently drop most rows.
+        // Prefer used range unless:
+        // - used range is too large to trim safely, but print area is manageable, OR
+        // - print area roughly matches the used range.
+        if (usedArea > maxCells.toLong() && printArea in 1..maxCells.toLong()) {
+            return print
+        }
+
+        val ratio = if (usedArea > 0) printArea.toDouble() / usedArea.toDouble() else 1.0
+        return if (ratio >= 0.65) print else used
     }
 
     private fun adaptColumnWidthsPx(
@@ -1386,13 +1550,6 @@ object ExcelBitmapRenderer {
         // This intentionally makes 2-line columns a tiny bit wider so most cells really stay 2 lines.
         val twoLineSafety = 1.10f
         val threeLineSafety = 1.06f
-        // Keep header reasonably compact: prevent a long header label from wrapping into too many lines,
-        // which would make the whole table look "very tall" even if data rows are short.
-        val headerMaxLines = 2
-        // For empty/sparse columns we can allow a slightly taller header to save horizontal space.
-        val headerMaxLinesTight = 3
-        val headerSafety = 1.10f
-        val headerSafetyTight = 1.02f
 
         // Deterministic per-sheet PRNG for reservoir sampling (stable output across runs).
         val rng =
@@ -1427,7 +1584,46 @@ object ExcelBitmapRenderer {
         }
 
         var processed = 0
-        val headerRow = firstRow
+        val headerRow =
+            detectHeaderRowIndex(
+                sheet = sheet,
+                formatter = formatter,
+                evaluator = evaluator,
+                firstRow = firstRow,
+                lastRow = lastRow,
+                firstCol = firstCol,
+                lastCol = lastCol,
+                mergeInfo = mergeInfo,
+            )
+
+        // For short/sparse sheets, prefer narrower columns by allowing headers to wrap into more lines.
+        // This improves phone readability (less horizontal whitespace -> larger on-screen text).
+        val approxVisibleDataRows =
+            run {
+                var cnt = 0
+                val it = sheet.rowIterator()
+                while (it.hasNext()) {
+                    val row = it.next()
+                    val r = row.rowNum
+                    if (r < firstRow || r > lastRow) continue
+                    if (row.zeroHeight) continue
+                    if (r <= headerRow) continue
+                    cnt += 1
+                }
+                cnt
+            }
+        // Keep header reasonably compact: prevent a long header label from wrapping into too many lines,
+        // which would make the whole table look "very tall" even if data rows are short.
+        val headerMaxLines = if (approxVisibleDataRows <= 20) 3 else 2
+        // For empty/sparse/short columns we can allow a taller header to save horizontal space.
+        val headerMaxLinesTight =
+            when {
+                approxVisibleDataRows <= 20 -> 6
+                approxVisibleDataRows <= 80 -> 5
+                else -> 4
+            }
+        val headerSafety = 1.10f
+        val headerSafetyTight = 1.02f
         var visibleDataRows = 0
 
         val rowIt = sheet.rowIterator()
@@ -1438,6 +1634,8 @@ object ExcelBitmapRenderer {
             if (row.zeroHeight) continue
 
             val isHeader = r == headerRow
+            // Rows above the detected header are typically titles/notes; don't let them influence layout heuristics.
+            if (r < headerRow) continue
             if (!isHeader) {
                 visibleDataRows++
             }
@@ -1467,11 +1665,16 @@ object ExcelBitmapRenderer {
 
                 if (spanFirstCol != spanLastCol) {
                     val span = (spanLastCol - spanFirstCol + 1).coerceAtLeast(1)
-                    for (absCol in spanFirstCol..spanLastCol) {
-                        val idx = absCol - firstCol
-                        if (idx in 0 until colCount) {
-                            nonEmptyAnyCounts[idx] += 1
-                            if (!isHeader) nonEmptyDataCounts[idx] += 1
+                    val bigSpanThreshold = max(4, (colCount * 0.85f).roundToInt())
+                    val isBigSpan = span >= bigSpanThreshold
+                    // Full-width merged paragraphs (titles/notes) should not mark every column as "non-empty".
+                    if (!isBigSpan) {
+                        for (absCol in spanFirstCol..spanLastCol) {
+                            val idx = absCol - firstCol
+                            if (idx in 0 until colCount) {
+                                nonEmptyAnyCounts[idx] += 1
+                                if (!isHeader) nonEmptyDataCounts[idx] += 1
+                            }
                         }
                     }
 
@@ -1521,6 +1724,12 @@ object ExcelBitmapRenderer {
                         continue
                     }
 
+                    // Treat big-span merged paragraphs as layout-neutral: they can wrap vertically and
+                    // shouldn't force all columns wider.
+                    if (isBigSpan && text.length >= 40) {
+                        continue
+                    }
+
                     processed++
                     if (processed > maxCells) {
                         return ColumnWidthOutcome(
@@ -1551,8 +1760,61 @@ object ExcelBitmapRenderer {
                         }
                     val measuredWithPadding = ceil(measured + padding * 2 + measureFudgePx).toInt()
 
-                    // Distribute merged-cell width across its spanned columns (best-effort).
-                    val perCol = ceil(measuredWithPadding.toFloat() / span.toFloat()).toInt()
+                    // Merged cells (especially those spanning many columns) are often used for titles/notes.
+                    // If we treat their text as "must fit in one line", they can force every column to become
+                    // very wide (wasting tons of space). Instead, allow the merged text to wrap into a few lines
+                    // and only enforce a softer minimum.
+                    val perCol = run {
+                        val soft =
+                            span >= 3 ||
+                                text.length >= 40 ||
+                                cell.cellStyle.wrapText ||
+                                text.contains('\n') ||
+                                text.contains('\r')
+                        if (!soft) {
+                            ceil(measuredWithPadding.toFloat() / span.toFloat()).toInt()
+                        } else {
+                            val contentWidth = max(0, measuredWithPadding - padding2Int)
+                            val len = text.length
+                            val mergeMaxLines =
+                                when {
+                                    span >= 6 -> when {
+                                        len >= 220 -> 8
+                                        len >= 160 -> 7
+                                        len >= 100 -> 6
+                                        else -> 5
+                                    }
+
+                                    span >= 4 -> when {
+                                        len >= 180 -> 7
+                                        len >= 120 -> 6
+                                        len >= 80 -> 5
+                                        else -> 4
+                                    }
+
+                                    span >= 3 -> when {
+                                        len >= 160 -> 6
+                                        len >= 100 -> 5
+                                        len >= 70 -> 4
+                                        else -> 3
+                                    }
+
+                                    else -> when {
+                                        len >= 120 -> 5
+                                        len >= 80 -> 4
+                                        len >= 60 -> 3
+                                        else -> 2
+                                    }
+                                }
+                            val mergeSafety = 1.05f
+                            val needTotal =
+                                ceil(
+                                    (contentWidth.toFloat() / mergeMaxLines.toFloat() + padding2Int.toFloat()) *
+                                        mergeSafety,
+                                ).toInt()
+                            ceil(needTotal.toFloat() / span.toFloat()).toInt()
+                        }
+                    }
                     for (absCol in spanFirstCol..spanLastCol) {
                         val idx = absCol - firstCol
                         if (idx in 0 until colCount) {
@@ -1580,27 +1842,26 @@ object ExcelBitmapRenderer {
                         } else {
                             text
                         }
-                    val measured0 = measureMaxLineWidthPx(textForMeasure, paint)
-                    val measured =
-                        if (textForMeasure.length in 1 until text.length) {
-                            measured0 * (text.length.toFloat() / textForMeasure.length.toFloat())
-                        } else {
-                            measured0
+                    fun headerNeed(maxLines: Int, safety: Float): Int {
+                        // Binary-search the minimal width so headers don't become "one char per line".
+                        // This uses the same line-breaking logic as rendering.
+                        val fullContent = max(1, ceil(measureMaxLineWidthPx(textForMeasure, paint)).toInt())
+                        var lo = 1
+                        var hi = fullContent
+                        while (lo < hi) {
+                            val mid = (lo + hi) / 2
+                            val lines = countLinesForLayout(textForMeasure, paint, mid.toFloat(), wrap = true)
+                            if (lines <= maxLines) {
+                                hi = mid
+                            } else {
+                                lo = mid + 1
+                            }
                         }
-                    val measuredWithPadding = ceil(measured + padding * 2 + measureFudgePx).toInt()
-                    val contentWidth = max(0, measuredWithPadding - padding2Int)
+                        return ceil((lo + padding2Int).toFloat() * safety).toInt()
+                    }
 
-                    // NOTE: padding is per-cell, not per-line. So it must NOT be divided by headerMaxLines.
-                    val need =
-                        ceil(
-                            (contentWidth.toFloat() / headerMaxLines.toFloat() + padding2Int.toFloat()) *
-                                headerSafety,
-                        ).toInt()
-                    val needTight =
-                        ceil(
-                            (contentWidth.toFloat() / headerMaxLinesTight.toFloat() + padding2Int.toFloat()) *
-                                headerSafetyTight,
-                        ).toInt()
+                    val need = headerNeed(headerMaxLines, headerSafety)
+                    val needTight = headerNeed(headerMaxLinesTight, headerSafetyTight)
                     minFromHeaders[colIdx] = max(minFromHeaders[colIdx], need)
                     minFromHeadersTight[colIdx] = max(minFromHeadersTight[colIdx], needTight)
                     continue
@@ -1742,7 +2003,8 @@ object ExcelBitmapRenderer {
                         arr.sort()
                         arr
                     }
-                    val w1Need = arrW1[p90Idx].coerceAtLeast(minColumnWidthPx)
+                    val w1NeedP90 = arrW1[p90Idx].coerceAtLeast(minColumnWidthPx)
+                    val w1NeedMax = maxMeasuredWithPaddingPx[i].coerceAtLeast(w1NeedP90).coerceAtLeast(minColumnWidthPx)
                     val req2 = IntArray(count) { j ->
                         val sampleW = samples[i][j]
                         val content = max(0, sampleW - padding2Int)
@@ -1759,7 +2021,6 @@ object ExcelBitmapRenderer {
                     val w2Need0 = req2[p90Idx].coerceAtLeast(minColumnWidthPx)
                     val w3Need0 = req3[p90Idx].coerceAtLeast(minColumnWidthPx)
 
-                    val baseMin = max(minFromMergedSpans[i], minFromHeaders[i]).coerceAtLeast(minColumnWidthPx)
                     val baseCapped = min(base, maxColumnWidthPx).coerceAtLeast(minColumnWidthPx)
                     val floorRatio = when {
                         medianLen >= 18 -> 0.55f
@@ -1771,20 +2032,63 @@ object ExcelBitmapRenderer {
                     val isNumericCol = numericRatio >= 0.80f
                     val isAsciiCol = asciiRatio >= 0.80f && cjkRatio < 0.20f
                     val isShortCol = p90Len < 10
+
+                    // When a column has a few very long outliers but is mostly short, treat it as a text column
+                    // so we can consider multi-line layouts (reduces overall width).
+                    val hasOutliers =
+                        maxTextLenSeen[i] >= max(24, (p90Len * 2).coerceAtLeast(18)) &&
+                            maxMeasuredWithPaddingPx[i].toFloat() > w1NeedP90.toFloat() * 1.35f
+
+                    // For short/numeric columns, allow header to wrap more lines so we can keep the column compact.
+                    val headerMin = if (isNumericCol || isAsciiCol || isShortCol) minFromHeadersTight[i] else minFromHeaders[i]
+                    val baseMin = max(minFromMergedSpans[i], headerMin).coerceAtLeast(minColumnWidthPx)
                     // Long id-like columns (mostly ASCII / numeric) become extremely wide if forced to a single line.
                     // For these, allow a 2-line layout to save horizontal space while still keeping cells readable.
                     val isLongTokenCol = (isNumericCol || isAsciiCol) && p90Len >= 20
 
-                    if (!isLongTokenCol && (isNumericCol || isAsciiCol || isShortCol)) {
+                    if (!hasOutliers && !isLongTokenCol && (isNumericCol || isAsciiCol || isShortCol)) {
+                        // Numeric/ASCII columns should not wrap for "normal" lengths (e.g. 1006, 2026-01-24).
+                        // Use max observed width rather than p90 to avoid dropping the largest-but-important cell.
+                        val w1Need = if ((isNumericCol || isAsciiCol) && maxTextLenSeen[i] < 20) w1NeedMax else w1NeedP90
                         val withMerged = max(w1Need, baseMin)
                         max(withMerged, floorFromExcel).coerceIn(minColumnWidthPx, maxColumnWidthPx)
                     } else {
-                        val w2 = max(w2Need0, baseMin).coerceIn(minColumnWidthPx, maxColumnWidthPx)
-                        val w3 = max(w3Need0, baseMin).coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                        val outlierW = maxMeasuredWithPaddingPx[i].coerceAtLeast(w1NeedP90)
+                        val outlierW2 = run {
+                            val content = max(0, outlierW - padding2Int)
+                            ceil(content.toFloat() / 2f * twoLineSafety + padding2Int.toFloat()).toInt()
+                                .coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                        }
+                        val outlierW3 = run {
+                            val content = max(0, outlierW - padding2Int)
+                            ceil(content.toFloat() / 3f * threeLineSafety + padding2Int.toFloat()).toInt()
+                                .coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                        }
+                        val w2Need = max(w2Need0, outlierW2)
+                        val w3Need = max(w3Need0, outlierW3)
+
+                        val w2 = max(w2Need, baseMin).coerceIn(minColumnWidthPx, maxColumnWidthPx)
+                        val w3 = max(w3Need, baseMin).coerceIn(minColumnWidthPx, maxColumnWidthPx)
                         cand2[i] = w2
                         cand3[i] = min(w2, w3)
                         canUse3[i] = p90Len >= 12 && cand3[i] < cand2[i]
-                        w2
+
+                        // If a column is mostly empty but contains a few long descriptions, using a 3-line
+                        // layout can save significant horizontal space while only affecting a small number
+                        // of rows (avoids "one sparse column makes the whole table wide").
+                        val isLowDensity =
+                            density < 0.25f ||
+                                (visibleDataRows <= 40 && density < 0.35f)
+                        val meaningfulSaving =
+                            cand3[i] > 0 &&
+                                cand2[i] > 0 &&
+                                cand3[i] < cand2[i] * 0.92f // >= ~8% narrower
+                        val prefer3 =
+                            visibleDataRows <= 80 &&
+                                isLowDensity &&
+                                meaningfulSaving
+
+                        if (prefer3) cand3[i] else w2
                     }
                 }
             }
@@ -1800,6 +2104,7 @@ object ExcelBitmapRenderer {
         // when the table would otherwise exceed max width (so we avoid tiny scale / unreadable exports).
         if (budgetScaled != Int.MAX_VALUE) {
             var total = scaledSumPx(out, scale)
+            var didDegradeForBudget = false
 
             if (total > budgetScaled) {
                 val degradeOrder =
@@ -1817,28 +2122,32 @@ object ExcelBitmapRenderer {
                     out[i] = target
                     total -= saving
                     changed = true
+                    didDegradeForBudget = true
                 }
             }
 
             // If the last downgrade over-saved, use remaining slack to upgrade the cheapest columns
-            // back to 2 lines (minimizes the number of 3-line columns).
-            var slack = budgetScaled - total
-            if (slack > 0) {
-                val upgradeOrder =
-                    (0 until colCount)
-                        .filter { cand2[it] > 0 && cand3[it] > 0 && out[it] == cand3[it] && cand2[it] > cand3[it] }
-                        .sortedBy { scaledPx(cand2[it], scale) - scaledPx(out[it], scale) }
+            // back to 2 lines (minimizes the number of 3-line columns). Only do this when we had to
+            // degrade for the width budget; otherwise it can undo intentional "compact" 3-line choices.
+            if (didDegradeForBudget) {
+                var slack = budgetScaled - total
+                if (slack > 0) {
+                    val upgradeOrder =
+                        (0 until colCount)
+                            .filter { cand2[it] > 0 && cand3[it] > 0 && out[it] == cand3[it] && cand2[it] > cand3[it] }
+                            .sortedBy { scaledPx(cand2[it], scale) - scaledPx(out[it], scale) }
 
-                for (i in upgradeOrder) {
-                    if (slack <= 0) break
-                    val old = out[i]
-                    val target = cand2[i]
-                    val cost = scaledPx(target, scale) - scaledPx(old, scale)
-                    if (cost <= 0) continue
-                    if (cost > slack) continue
-                    out[i] = target
-                    slack -= cost
-                    changed = true
+                    for (i in upgradeOrder) {
+                        if (slack <= 0) break
+                        val old = out[i]
+                        val target = cand2[i]
+                        val cost = scaledPx(target, scale) - scaledPx(old, scale)
+                        if (cost <= 0) continue
+                        if (cost > slack) continue
+                        out[i] = target
+                        slack -= cost
+                        changed = true
+                    }
                 }
             }
         }
@@ -2513,7 +2822,10 @@ object ExcelBitmapRenderer {
         var start = 0
         while (start < text.length) {
             var count = paint.breakText(text, start, text.length, true, maxWidth, null)
-            if (count <= 0) break
+            if (count <= 0) {
+                // Extremely narrow widths can yield 0; still advance to avoid an infinite loop.
+                count = 1
+            }
             val eps = 1.01f
             val remainingStart0 = start + count
             if (remainingStart0 < text.length) {

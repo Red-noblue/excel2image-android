@@ -13,7 +13,7 @@
 ## GitHub Releases 分发（给少数人安装）
 
 - 用户只需要在 GitHub 仓库点 `Watch -> Releases`，就能只接收发版通知
-- 每次发版会生成一个带版本号的 APK（例如：`excel2image-v0.1.16.apk`，点开即可安装）
+- 每次发版会生成一个带版本号的 APK（例如：`excel2image-v0.1.17.apk`，点开即可安装）
 
 ## 发版（自动构建 APK）
 
@@ -25,14 +25,14 @@
 2) 打 tag 并推送：
 
 ```bash
-git tag -a v0.1.16 -m "v0.1.16"
-git push origin v0.1.16
+git tag -a v0.1.17 -m "v0.1.17"
+git push origin v0.1.17
 ```
 
 3) GitHub -> Releases -> Draft a new release
-   - 选择 tag：`v0.1.16`
+   - 选择 tag：`v0.1.17`
    - Publish release
-4) 等 Actions 跑完，在 Release -> Assets 下载 `excel2image-v0.1.16.apk` 安装到手机
+4) 等 Actions 跑完，在 Release -> Assets 下载 `excel2image-v0.1.17.apk` 安装到手机
 
 ## 打包 APK
 
